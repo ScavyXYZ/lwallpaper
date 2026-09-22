@@ -15,112 +15,112 @@
   </property>
   <property name="styleSheet">
    <string notr="true">/* ==========================================================================
-   ГОЛОВНЕ ВІКНО ТА ЦЕНТРАЛЬНИЙ ВІДЖЕТ
+   MAIN WINDOW AND CENTRAL WIDGET
    ========================================================================== */
 QMainWindow, QWidget#centralWidget {
-    background-color: #FFF5F7; /* М'який пастельно-рожевий фон */
+    background-color: #F5F6F8; /* Soft neutral background */
     font-family: &quot;Segoe UI&quot;, &quot;Helvetica Neue&quot;, Arial, sans-serif;
 }
 
 /* ==========================================================================
-   СПИСОК ВІДЕО (QListWidget)
+   VIDEO LIST (QListWidget)
    ========================================================================== */
 QListWidget {
-    background-color: #FFFFFF; /* Чистий білий колір для контрасту */
-    border: 2px solid #FAD0DD;  /* Акуратна світло-рожева рамка */
-    border-radius: 12px;        /* Закруглені кути */
+    background-color: #FFFFFF; /* Clean white for contrast */
+    border: 2px solid #D8DDE3; /* Subtle light gray border */
+    border-radius: 12px;       /* Rounded corners */
     padding: 8px;
-    color: #4A3E41;             /* Темно-сірий текст із теплим підтоном */
+    color: #3C434B;            /* Dark neutral text */
     font-size: 14px;
-    outline: 0;                 /* Прибираємо рамку фокусу навколо елементів */
+    outline: 0;                /* Remove the focus frame around items */
 }
 
-/* Елементи списку */
+/* List items */
 QListWidget::item {
     padding: 10px 12px;
     border-radius: 8px;
     margin-bottom: 4px;
-    color: #5A4B4E;
+    color: #3C434B;
 }
 
-/* Наведення курсору на елемент списку */
+/* Hovered list item */
 QListWidget::item:hover {
-    background-color: #FFE3EA;  /* Легкий рожевий відтінок */
-    color: #2B1F21;
+    background-color: #E9EFF4; /* Light neutral highlight */
+    color: #1E252C;
 }
 
-/* Виділений (активний) елемент у списку */
+/* Selected (active) list item */
 QListWidget::item:selected {
-    background-color: #FF9EBB;  /* Насичений рожевий акцент */
-    color: #FFFFFF;             /* Білий текст для читаємості */
+    background-color: #4C7EAE; /* Steel blue accent */
+    color: #FFFFFF;            /* White text for readability */
     font-weight: 600;
 }
 
 /* ==========================================================================
-   ЗАГАЛЬНІ СТИЛІ ДЛЯ КНОПОК (QPushButton)
+   COMMON BUTTON STYLES (QPushButton)
    ========================================================================== */
 QPushButton {
-    background-color: #FFAECA;  /* Базовий приємний рожевий */
+    background-color: #54708C; /* Base slate blue */
     color: #FFFFFF;
     border: none;
-    border-radius: 10px;        /* Закруглені кути кнопок */
+    border-radius: 10px;       /* Rounded button corners */
     font-size: 13px;
     font-weight: bold;
 }
 
-/* Ефекти для звичайних кнопок (Старт / Додати) */
+/* Effects for regular buttons (Start / Add) */
 QPushButton:hover {
-    background-color: #FF8FAB;  /* Темніший при наведенні */
+    background-color: #46607A; /* Darker on hover */
 }
 
 QPushButton:pressed {
-    background-color: #FB6F92;  /* Глибокий рожевий при натисканні */
+    background-color: #385066; /* Deep slate when pressed */
 }
 
 /* ==========================================================================
-   ОКРЕМІ СТИЛІ ДЛЯ КНОПОК &quot;Зупинити&quot; ТА &quot;Видалити&quot;
+   SEPARATE STYLES FOR THE STOP AND DELETE BUTTONS
    ========================================================================== */
 QPushButton#pushButtonStop, QPushButton#pushButtonDelete {
-    background-color: #F4C2D1;  /* Більш спокійний, приглушений відтінок */
+    background-color: #8A97A5; /* Calmer, muted shade */
 }
 
 QPushButton#pushButtonStop:hover, QPushButton#pushButtonDelete:hover {
-    background-color: #ECB3C4; 
+    background-color: #7A8896;
 }
 
 QPushButton#pushButtonStop:pressed, QPushButton#pushButtonDelete:pressed {
-    background-color: #D898AA; 
+    background-color: #697684;
 }
 
 /* ==========================================================================
-   СТАН ВИМКНЕНОЇ КНОПКИ (коли в коді setEnabled(false))
+   DISABLED BUTTON STATE (when setEnabled(false) is called in code)
    ========================================================================== */
-QPushButton:disabled, 
-QPushButton#pushButtonStop:disabled, 
+QPushButton:disabled,
+QPushButton#pushButtonStop:disabled,
 QPushButton#pushButtonDelete:disabled {
-    background-color: #E8DFE2;  /* Нейтральний сіро-рожевий колір */
-    color: #A89FA2;             /* Тьмяний текст */
+    background-color: #E1E4E8; /* Neutral gray */
+    color: #A3AAB2;            /* Dimmed text */
 }
 
 /* ==========================================================================
-   СМУГА ПРОКРУТКИ (QScrollBar)
+   SCROLLBAR (QScrollBar)
    ========================================================================== */
 QScrollBar:vertical {
     border: none;
-    background: #FFF5F7;
+    background: #F5F6F8;
     width: 8px;
     margin: 4px 0 4px 0;
     border-radius: 4px;
 }
 
 QScrollBar::handle:vertical {
-    background: #FAD0DD;
+    background: #C6CED6;
     min-height: 20px;
     border-radius: 4px;
 }
 
 QScrollBar::handle:vertical:hover {
-    background: #FF9EBB;
+    background: #A9B4BF;
 }
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
@@ -151,7 +151,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     <item row="0" column="0" rowspan="5">
      <widget class="QListWidget" name="listWidget">
       <property name="toolTip">
-       <string>Оберіть відео зі списку для запуску</string>
+       <string>Select a video from the list to play</string>
       </property>
      </widget>
     </item>
@@ -164,7 +164,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
        </size>
       </property>
       <property name="text">
-       <string>Запустити шпалери</string>
+       <string>Start Wallpaper</string>
       </property>
      </widget>
     </item>
@@ -177,7 +177,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
        </size>
       </property>
       <property name="text">
-       <string>Зупинити</string>
+       <string>Stop</string>
       </property>
      </widget>
     </item>
@@ -190,7 +190,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
        </size>
       </property>
       <property name="text">
-       <string>Додати нове відео...</string>
+       <string>Add New Video...</string>
       </property>
      </widget>
     </item>
@@ -203,7 +203,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
        </size>
       </property>
       <property name="text">
-       <string>Видалити шпалери</string>
+       <string>Delete Wallpaper</string>
       </property>
      </widget>
     </item>

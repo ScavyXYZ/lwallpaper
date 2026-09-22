@@ -20,7 +20,7 @@ lwallpaperGUI::lwallpaperGUI(QWidget* parent)
 		});
 
 	connect(m_api, &WallpaperAPI::errorOccurred, this, [this](const QString& err) {
-		QMessageBox::critical(this, "Помилка", err);
+		QMessageBox::critical(this, "Error", err);
 		ui.pushButtonStart->setEnabled(true);
 		ui.pushButtonStop->setEnabled(false);
 		ui.pushButtonAdd->setEnabled(true);
@@ -35,14 +35,14 @@ lwallpaperGUI::lwallpaperGUI(QWidget* parent)
 		ui.pushButtonStart->setEnabled(true);
 		ui.pushButtonAdd->setEnabled(true);
 		ui.pushButtonDelete->setEnabled(true);
-		ui.statusBar->showMessage("Систему відтворення повністю зупинено.");
+		ui.statusBar->showMessage("Playback fully stopped.");
 		});
 	m_trayMenu = new QMenu(this);
 
-	QAction* showAction = m_trayMenu->addAction("Відкрити налаштування");
-	QAction* stopWallpaperAction = m_trayMenu->addAction("Вимкнути шпалери");
+	QAction* showAction = m_trayMenu->addAction("Open Settings");
+	QAction* stopWallpaperAction = m_trayMenu->addAction("Stop Wallpaper");
 	m_trayMenu->addSeparator();
-	QAction* quitAction = m_trayMenu->addAction("Вийти повністю");
+	QAction* quitAction = m_trayMenu->addAction("Exit");
 
 	connect(showAction, &QAction::triggered, this, &lwallpaperGUI::showNormal);
 	connect(stopWallpaperAction, &QAction::triggered, this, &lwallpaperGUI::on_pushButtonStop_clicked);
@@ -74,7 +74,7 @@ void lwallpaperGUI::on_pushButtonStart_clicked()
 {
 	QListWidgetItem* current = ui.listWidget->currentItem();
 	if (!current) {
-		ui.statusBar->showMessage("Будь ласка, оберіть відео зі списку!");
+		ui.statusBar->showMessage("Please select a video from the list first!");
 		return;
 	}
 
@@ -109,13 +109,13 @@ void lwallpaperGUI::on_pushButtonStop_clicked()
 
 	QString appDataPath = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/LWallpaper";
 	QFile::remove(appDataPath + "/last_wallpaper.txt");
-	ui.statusBar->showMessage("Зупинка шпалер...");
+	ui.statusBar->showMessage("Stopping wallpaper...");
 	m_api->stop();
 }
 
 void lwallpaperGUI::on_pushButtonAdd_clicked()
 {
-	QString filePath = QFileDialog::getOpenFileName(this, "Оберіть відео для шпалер", "", "Video Files (*.mp4 *.mkv *.webm *.avi)");
+	QString filePath = QFileDialog::getOpenFileName(this, "Select a Wallpaper Video", "", "Video Files (*.mp4 *.mkv *.webm *.avi)");
 	if (filePath.isEmpty()) return;
 
 	QFileInfo info(filePath);
@@ -126,15 +126,15 @@ void lwallpaperGUI::on_pushButtonAdd_clicked()
 	ui.pushButtonAdd->setEnabled(false);
 	ui.pushButtonDelete->setEnabled(false);
 
-	QProgressDialog* progress = new QProgressDialog("Транскодування відео під розмір екрану...", "Скасувати", 0, 0, this);
+	QProgressDialog* progress = new QProgressDialog("Transcoding video to fit the screen...", "Cancel", 0, 0, this);
 	progress->setWindowModality(Qt::WindowModal);
-	progress->setWindowTitle("Будь ласка, зачекайте");
+	progress->setWindowTitle("Please Wait");
 	progress->setMinimum(0);
 	progress->setMaximum(0);
 
 	connect(progress, &QProgressDialog::canceled, this, [this]() {
 		m_api->cancelTranscode();
-		ui.statusBar->showMessage("Конвертацію скасовано.");
+		ui.statusBar->showMessage("Conversion cancelled.");
 		});
 
 	QMetaObject::Connection* conn = new QMetaObject::Connection();
@@ -143,10 +143,10 @@ void lwallpaperGUI::on_pushButtonAdd_clicked()
 		progress->deleteLater();
 
 		if (success) {
-			ui.statusBar->showMessage("Відео успішно додано: " + name);
+			ui.statusBar->showMessage("Video added successfully: " + name);
 		}
-		else if (!err.isEmpty() && err != "Обробку скасовано користувачем.") {
-			QMessageBox::critical(this, "Помилка конвертації", err);
+		else if (!err.isEmpty() && err != "Processing cancelled by the user.") {
+			QMessageBox::critical(this, "Conversion Error", err);
 		}
 
 		ui.pushButtonStart->setEnabled(true);
@@ -181,7 +181,7 @@ void lwallpaperGUI::on_pushButtonDelete_clicked()
 {
 	QListWidgetItem* current = ui.listWidget->currentItem();
 	if (!current) {
-		ui.statusBar->showMessage("Будь ласка, оберіть відео для видалення!");
+		ui.statusBar->showMessage("Please select a video to delete first!");
 		return;
 	}
 
@@ -189,8 +189,8 @@ void lwallpaperGUI::on_pushButtonDelete_clicked()
 
 	QMessageBox::StandardButton reply;
 	reply = QMessageBox::question(this,
-		"Підтвердження видалення",
-		QString("Ви впевнені, що хочете назавжди видалити шпалери \"%1\"?").arg(filename),
+		"Confirm Deletion",
+		QString("Are you sure you want to permanently delete the wallpaper \"%1\"?").arg(filename),
 		QMessageBox::Yes | QMessageBox::No
 	);
 
@@ -210,7 +210,7 @@ void lwallpaperGUI::closeEvent(QCloseEvent* event)
 
 		m_trayIcon->showMessage(
 			"Lwallpaper",
-			"Програма згорнута в трей і продовжує працювати.",
+			"The application has been minimized to the tray and is still running.",
 			QSystemTrayIcon::Information,
 			2000
 		);

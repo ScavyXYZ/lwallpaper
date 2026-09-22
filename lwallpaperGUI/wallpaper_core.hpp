@@ -524,10 +524,10 @@ namespace wallpaper {
 
 		try {
 			if (avformat_open_input(&inFmtCtx, inputPath.c_str(), nullptr, nullptr) < 0) {
-				throw std::runtime_error("Не вдалося відкрити вхідний файл.");
+				throw std::runtime_error("Failed to open the input file.");
 			}
 			if (avformat_find_stream_info(inFmtCtx, nullptr) < 0) {
-				throw std::runtime_error("Не вдалося отримати інформацію про потоки.");
+				throw std::runtime_error("Failed to retrieve stream information.");
 			}
 
 			for (unsigned int i = 0; i < inFmtCtx->nb_streams; i++) {
@@ -537,39 +537,39 @@ namespace wallpaper {
 				}
 			}
 			if (videoStreamIndex == -1) {
-				throw std::runtime_error("Відеопотік не знайдено у вхідному файлі.");
+				throw std::runtime_error("No video stream found in the input file.");
 			}
 
 			AVCodecParameters* inCodecPar = inFmtCtx->streams[videoStreamIndex]->codecpar;
 			const AVCodec* decoder = avcodec_find_decoder(inCodecPar->codec_id);
 			if (!decoder) {
-				throw std::runtime_error("Не знайдено підходящий декодер.");
+				throw std::runtime_error("No suitable decoder found.");
 			}
 
 			decCtx = avcodec_alloc_context3(decoder);
 			if (!decCtx || avcodec_parameters_to_context(decCtx, inCodecPar) < 0 || avcodec_open2(decCtx, decoder, nullptr) < 0) {
-				throw std::runtime_error("Не вдалося ініціалізувати контекст декодера.");
+				throw std::runtime_error("Failed to initialize the decoder context.");
 			}
 
 			auto [screenWidth, screenHeight] = physical_screen_size();
 
 			if (avformat_alloc_output_context2(&outFmtCtx, nullptr, "mp4", outputPath.c_str()) < 0) {
-				throw std::runtime_error("Не вдалося створити вихідний контекст.");
+				throw std::runtime_error("Failed to create the output context.");
 			}
 
 			const AVCodec* encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
 			if (!encoder) {
-				throw std::runtime_error("Енкодер H.264 не знайдено.");
+				throw std::runtime_error("H.264 encoder not found.");
 			}
 
 			AVStream* outStream = avformat_new_stream(outFmtCtx, nullptr);
 			if (!outStream) {
-				throw std::runtime_error("Не вдалося створити вихідний потік.");
+				throw std::runtime_error("Failed to create the output stream.");
 			}
 
 			encCtx = avcodec_alloc_context3(encoder);
 			if (!encCtx) {
-				throw std::runtime_error("Не вдалося виділити контекст енкодера.");
+				throw std::runtime_error("Failed to allocate the encoder context.");
 			}
 
 			encCtx->height = screenHeight;
@@ -596,17 +596,17 @@ namespace wallpaper {
 			av_opt_set(encCtx->priv_data, "tune", "zerolatency", 0);
 
 			if (avcodec_open2(encCtx, encoder, nullptr) < 0 || avcodec_parameters_from_context(outStream->codecpar, encCtx) < 0) {
-				throw std::runtime_error("Не вдалося відкрити або налаштувати енкодер.");
+				throw std::runtime_error("Failed to open or configure the encoder.");
 			}
 
 			if (!(outFmtCtx->oformat->flags & AVFMT_NOFILE)) {
 				if (avio_open(&outFmtCtx->pb, outputPath.c_str(), AVIO_FLAG_WRITE) < 0) {
-					throw std::runtime_error("Не вдалося створити файл для запису.");
+					throw std::runtime_error("Failed to create the output file for writing.");
 				}
 			}
 
 			if (avformat_write_header(outFmtCtx, nullptr) < 0) {
-				throw std::runtime_error("Не вдалося записати заголовок вихідного файлу.");
+				throw std::runtime_error("Failed to write the output file header.");
 			}
 
 			swsCtx = sws_getContext(
@@ -615,7 +615,7 @@ namespace wallpaper {
 				SWS_BILINEAR, nullptr, nullptr, nullptr
 			);
 			if (!swsCtx) {
-				throw std::runtime_error("Не вдалося ініціалізувати SwsContext.");
+				throw std::runtime_error("Failed to initialize SwsContext.");
 			}
 
 			inPacket = av_packet_alloc();
@@ -627,7 +627,7 @@ namespace wallpaper {
 			encFrame->width = encCtx->width;
 			encFrame->height = encCtx->height;
 			if (av_frame_get_buffer(encFrame, 0) < 0) {
-				throw std::runtime_error("Не вдалося виділити буфер для вихідного кадру.");
+				throw std::runtime_error("Failed to allocate the output frame buffer.");
 			}
 
 			int64_t ptsCounter = 0;
@@ -713,7 +713,7 @@ namespace wallpaper {
 		}
 
 		if (cancelled.load() || !success) {
-			throw std::runtime_error("Транскодування перервано або скасовано.");
+			throw std::runtime_error("Transcoding was interrupted or cancelled.");
 		}
 	}
 }

@@ -25,7 +25,7 @@ public:
 public slots:
 	void startPlayback() {
 		try {
-			emit statusChanged("Ініціалізація середовища...");
+			emit statusChanged("Initializing environment...");
 			timeBeginPeriod(1);
 
 			HWND parent = wallpaper::wallpaper_hwnd(m_w, m_h);
@@ -40,7 +40,7 @@ public slots:
 			Decoder decoder(m_videoPath.toStdString(), queue, m_cancelled);
 			decoder.start();
 
-			emit statusChanged("Шпалери запущено.");
+			emit statusChanged("Wallpaper started.");
 			Renderer renderer(child_hwnd, m_w, m_h);
 
 			renderer.run(queue, m_cancelled, decoder.done_flag());
@@ -51,7 +51,7 @@ public slots:
 
 			DestroyWindow(child_hwnd);
 			timeEndPeriod(1);
-			emit statusChanged("Шпалери вимкнено.");
+			emit statusChanged("Wallpaper stopped.");
 		}
 		catch (const std::exception& ex) {
 			timeEndPeriod(1);
@@ -89,7 +89,7 @@ public slots:
 
 			if (m_cancelled.load()) {
 				QFile::remove(m_output);
-				emit finished(false, "Обробку скасовано користувачем.");
+				emit finished(false, "Processing cancelled by the user.");
 			}
 			else {
 				emit finished(true, "");
@@ -131,7 +131,7 @@ public:
 
 		QString videoPath = getAppDataPath() + "/wallpapers/" + filename;
 		if (!QFile::exists(videoPath)) {
-			emit errorOccurred("Файл не знайдено: " + filename);
+			emit errorOccurred("File not found: " + filename);
 			return false;
 		}
 
@@ -167,8 +167,8 @@ public:
 
 	void add(const QString& inputPath, const QString& targetFilename) {
 		if (!QFile::exists(inputPath)) {
-			emit errorOccurred("Файл не існує.");
-			emit transcodeFinished(false, targetFilename, "Файл не існує.");
+			emit errorOccurred("File does not exist.");
+			emit transcodeFinished(false, targetFilename, "File does not exist.");
 			return;
 		}
 
@@ -177,7 +177,7 @@ public:
 		QString outputPath = dir.absoluteFilePath(targetFilename);
 
 		if (m_wallpapers.contains(targetFilename)) {
-			emit statusChanged("Відео вже є у списку.");
+			emit statusChanged("Video already exists in the list.");
 			emit transcodeFinished(true, targetFilename, "");
 			return;
 		}
@@ -215,7 +215,7 @@ public:
 		QString videoPath = getAppDataPath() + "/wallpapers/" + filename;
 		if (QFile::exists(videoPath)) {
 			if (!QFile::remove(videoPath)) {
-				emit errorOccurred("Не вдалося фізично видалити файл відео з диску.");
+				emit errorOccurred("Failed to delete the video file from disk.");
 				return false;
 			}
 		}
@@ -224,7 +224,7 @@ public:
 
 		saveIndex();
 
-		emit statusChanged("Шпалери успішно видалено.");
+		emit statusChanged("Wallpaper deleted successfully.");
 		return true;
 	}
 

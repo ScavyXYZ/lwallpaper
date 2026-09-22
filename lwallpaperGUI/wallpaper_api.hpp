@@ -29,7 +29,17 @@ public slots:
 			timeBeginPeriod(1);
 
 			HWND parent = wallpaper::wallpaper_hwnd(m_w, m_h);
-			while (!parent) parent = wallpaper::wallpaper_hwnd(m_w, m_h);
+			while (!parent && !m_cancelled.load()) {
+				QThread::msleep(15);
+				parent = wallpaper::wallpaper_hwnd(m_w, m_h);
+			}
+			if (!parent) {
+				// Cancelled (e.g. Stop pressed) while still waiting for the desktop's
+				// WorkerW window - nothing was created yet, so just exit cleanly.
+				timeEndPeriod(1);
+				emit finished();
+				return;
+			}
 
 			HINSTANCE inst = GetModuleHandle(nullptr);
 			HWND child_hwnd = wallpaper::create_wallpaper_child(inst, parent, m_w, m_h);
@@ -150,6 +160,7 @@ public:
 		connect(m_thread, &QThread::finished, m_thread, &QThread::deleteLater);
 		connect(m_thread, &QThread::destroyed, this, &WallpaperAPI::playbackStopped);
 		m_thread->start();
+		m_activeFilename = filename;
 		return true;
 	}
 
@@ -163,6 +174,13 @@ public:
 		}
 		m_worker = nullptr;
 		m_thread = nullptr;
+		m_activeFilename.clear();
+	}
+
+	// True while `filename` is the one currently being decoded/rendered. Used to
+	// stop the user from deleting a video file out from under an active decoder.
+	bool isActive(const QString& filename) const {
+		return m_thread != nullptr && m_activeFilename == filename;
 	}
 
 	void add(const QString& inputPath, const QString& targetFilename) {
@@ -209,6 +227,11 @@ public:
 	}
 	bool remove(const QString& filename) {
 		if (!m_wallpapers.contains(filename)) {
+			return false;
+		}
+
+		if (isActive(filename)) {
+			emit errorOccurred("Stop the wallpaper before deleting the video that's currently playing.");
 			return false;
 		}
 
@@ -273,4 +296,5 @@ private:
 	QSet<QString> m_wallpapers;
 	QPointer<QThread> m_thread;
 	QPointer<WallpaperWorker> m_worker;
+	QString m_activeFilename;
 };

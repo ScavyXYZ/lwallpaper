@@ -25,6 +25,7 @@ private slots:
     void on_pushButtonStop_clicked();
     void on_pushButtonAdd_clicked();
     void on_pushButtonDelete_clicked();
+    void updateDeleteButtonState();
 
 private:
     Ui::lwallpaperGUIClass ui;

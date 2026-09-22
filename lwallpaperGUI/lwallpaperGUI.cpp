@@ -24,7 +24,7 @@ lwallpaperGUI::lwallpaperGUI(QWidget* parent)
 		ui.pushButtonStart->setEnabled(true);
 		ui.pushButtonStop->setEnabled(false);
 		ui.pushButtonAdd->setEnabled(true);
-		ui.pushButtonDelete->setEnabled(true);
+		updateDeleteButtonState();
 		});
 
 	connect(m_api, &WallpaperAPI::wallpaperAdded, this, [this](const QString& newWp) {
@@ -34,8 +34,12 @@ lwallpaperGUI::lwallpaperGUI(QWidget* parent)
 	connect(m_api, &WallpaperAPI::playbackStopped, this, [this]() {
 		ui.pushButtonStart->setEnabled(true);
 		ui.pushButtonAdd->setEnabled(true);
-		ui.pushButtonDelete->setEnabled(true);
+		updateDeleteButtonState();
 		ui.statusBar->showMessage("Playback fully stopped.");
+		});
+
+	connect(ui.listWidget, &QListWidget::currentItemChanged, this, [this](QListWidgetItem*, QListWidgetItem*) {
+		updateDeleteButtonState();
 		});
 	m_trayMenu = new QMenu(this);
 
@@ -95,12 +99,23 @@ void lwallpaperGUI::on_pushButtonStart_clicked()
 		}
 
 		ui.pushButtonStop->setEnabled(true);
+		ui.pushButtonAdd->setEnabled(true);
+		updateDeleteButtonState();
 	}
 	else {
 		ui.pushButtonStart->setEnabled(true);
-		ui.pushButtonDelete->setEnabled(true);
 		ui.pushButtonAdd->setEnabled(true);
+		updateDeleteButtonState();
 	}
+}
+
+void lwallpaperGUI::updateDeleteButtonState()
+{
+	// Deleting is allowed for any video except the one currently playing -
+	// removing that file out from under the active decoder is unsafe.
+	QListWidgetItem* current = ui.listWidget->currentItem();
+	bool selectedIsPlaying = current && m_api->isActive(current->text());
+	ui.pushButtonDelete->setEnabled(!selectedIsPlaying);
 }
 
 void lwallpaperGUI::on_pushButtonStop_clicked()

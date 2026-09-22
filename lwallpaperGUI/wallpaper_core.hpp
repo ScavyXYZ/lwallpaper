@@ -7,6 +7,7 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/time.h>
 #include <libavutil/opt.h>
+#include <libavutil/hwcontext.h>
 }
 
 #include <SDL3/SDL.h>
@@ -36,6 +37,8 @@ extern "C" {
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shcore.lib")
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
 
 #define DEBUG_ENABLED 0
 #if DEBUG_ENABLED
@@ -117,6 +120,11 @@ namespace ffmpeg {
 		void operator()(SwsContext* p) const { sws_freeContext(p); }
 	};
 	using SwsContextPtr = std::unique_ptr<SwsContext, SwsContextDeleter>;
+
+	struct BufferRefDeleter {
+		void operator()(AVBufferRef* p) const { av_buffer_unref(&p); }
+	};
+	using BufferRefPtr = std::unique_ptr<AVBufferRef, BufferRefDeleter>;
 
 	struct AvBuffer {
 		uint8_t* data = nullptr;
@@ -269,14 +277,31 @@ private:
 		codec_ctx_->thread_count = 0;
 		codec_ctx_->thread_type = FF_THREAD_FRAME;
 
+		// The wallpaper plays continuously for as long as the desktop is up, so
+		// decoding cost is paid indefinitely rather than once. Try D3D11VA hardware
+		// decode first to offload that ongoing CPU/power cost to the GPU; if the
+		// codec, driver or hardware doesn't support it, fall back to software decode
+		// transparently - this must never be fatal.
+		try_enable_hw_decode(codec);
+
 		err = avcodec_open2(codec_ctx_.get(), codec, nullptr);
 		if (err < 0)
 			throw std::runtime_error("Cannot open codec: " + ffmpeg::av_error(err));
 		LOG_INFO("Codec opened, resolution=" << codec_ctx_->width << "x" << codec_ctx_->height
-			<< ", pix_fmt=" << av_get_pix_fmt_name(codec_ctx_->pix_fmt));
+			<< ", pix_fmt=" << av_get_pix_fmt_name(codec_ctx_->pix_fmt)
+			<< ", hw_accel=" << (hw_accel_active_ ? "yes" : "no"));
 
 		time_base_ = av_q2d(fmt_ctx_->streams[stream_idx_]->time_base);
 		LOG_INFO("Time base=" << time_base_);
+
+		if (hw_accel_active_) {
+			// codec_ctx_->pix_fmt is a hardware surface format here (e.g. D3D11), which
+			// swscale cannot consume directly. The real transferred format is only known
+			// once the first frame comes back from av_hwframe_transfer_data, so sws setup
+			// happens lazily in ensure_conversion_target() instead.
+			LOG_INFO("Hardware decode active, deferring conversion setup until first frame");
+			return;
+		}
 
 		needs_conversion_ = (codec_ctx_->pix_fmt != AV_PIX_FMT_YUV420P &&
 			codec_ctx_->pix_fmt != AV_PIX_FMT_YUVJ420P);
@@ -286,6 +311,33 @@ private:
 		}
 		else {
 			LOG_INFO("Pixel format already YUV420P, no conversion");
+		}
+	}
+
+	void try_enable_hw_decode(const AVCodec* codec) {
+		for (int i = 0;; ++i) {
+			const AVCodecHWConfig* cfg = avcodec_get_hw_config(codec, i);
+			if (!cfg) {
+				LOG_INFO("No D3D11VA hw config available for codec " << codec->name << ", using software decode");
+				return;
+			}
+			if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
+				cfg->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
+				AVBufferRef* raw_hw_ctx = nullptr;
+				int err = av_hwdevice_ctx_create(&raw_hw_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
+				if (err < 0) {
+					LOG_WARN("D3D11VA device creation failed: " << ffmpeg::av_error(err) << ", using software decode");
+					return;
+				}
+				hw_device_ctx_.reset(raw_hw_ctx);
+				codec_ctx_->hw_device_ctx = av_buffer_ref(hw_device_ctx_.get());
+				hw_pix_fmt_ = cfg->pix_fmt;
+				codec_ctx_->opaque = this;
+				codec_ctx_->get_format = &Decoder::get_hw_format;
+				hw_accel_active_ = true;
+				LOG_INFO("D3D11VA hardware decode enabled for codec " << codec->name);
+				return;
+			}
 		}
 	}
 
@@ -364,20 +416,64 @@ private:
 				break;
 			}
 
-			AVFrame* src = frame;
+			// Hardware-decoded frames live in GPU memory (a D3D11 surface handle) and
+			// must be transferred to system memory before sws_scale or the SDL texture
+			// upload can touch their pixel data.
+			ffmpeg::FramePtr sw_frame;
+			AVFrame* decoded = frame;
+			if (hw_accel_active_ && frame->format == hw_pix_fmt_) {
+				sw_frame.reset(av_frame_alloc());
+				if (av_hwframe_transfer_data(sw_frame.get(), frame, 0) < 0) {
+					LOG_WARN("hwframe transfer failed, dropping frame");
+					continue;
+				}
+				decoded = sw_frame.get();
+				ensure_conversion_target(decoded);
+			}
+
+			AVFrame* src = decoded;
 			if (needs_conversion_ && sws_ctx_) {
-				sws_scale(sws_ctx_.get(), frame->data, frame->linesize,
+				sws_scale(sws_ctx_.get(), decoded->data, decoded->linesize,
 					0, codec_ctx_->height,
 					yuv_frame_->data, yuv_frame_->linesize);
 				src = yuv_frame_.get();
 			}
 
-			YUVFrame yf = build_yuv_frame(src, frame);
+			YUVFrame yf = build_yuv_frame(src, decoded);
 			if (!queue_.push(std::move(yf), cancelled_)) break;
 			frame_count++;
 			if (frame_count % 100 == 0) {
 				LOG_INFO("Decoded " << frame_count << " frames");
 			}
+		}
+	}
+
+	// D3D11VA-transferred frames typically come back as NV12, which differs from
+	// the codec's original pix_fmt that build_sws() was sized for at open() time.
+	// Lazily (re)build the sws context the first time we see the actual transferred
+	// format, since it isn't known until the first real frame arrives.
+	void ensure_conversion_target(const AVFrame* transferred) {
+		auto fmt = static_cast<AVPixelFormat>(transferred->format);
+		if (sws_ctx_ && fmt == sws_src_fmt_) return;
+
+		needs_conversion_ = (fmt != AV_PIX_FMT_YUV420P && fmt != AV_PIX_FMT_YUVJ420P);
+		sws_src_fmt_ = fmt;
+		if (!needs_conversion_) { sws_ctx_.reset(); return; }
+
+		SwsContext* raw_sws = sws_getContext(codec_ctx_->width, codec_ctx_->height, fmt,
+			codec_ctx_->width, codec_ctx_->height, AV_PIX_FMT_YUV420P,
+			SWS_BILINEAR, nullptr, nullptr, nullptr);
+		if (!raw_sws) throw std::runtime_error("Cannot create SwsContext for hw-transferred frame.");
+		sws_ctx_.reset(raw_sws);
+		sws_src_fmt_ = fmt;
+
+		if (!yuv_frame_) {
+			yuv_frame_.reset(av_frame_alloc());
+			int sz = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, codec_ctx_->width, codec_ctx_->height, 1);
+			sws_buf_ = std::make_unique<ffmpeg::AvBuffer>(sz);
+			av_image_fill_arrays(yuv_frame_->data, yuv_frame_->linesize,
+				sws_buf_->data, AV_PIX_FMT_YUV420P,
+				codec_ctx_->width, codec_ctx_->height, 1);
 		}
 	}
 
@@ -417,10 +513,26 @@ private:
 	ffmpeg::SwsContextPtr    sws_ctx_;
 	ffmpeg::FramePtr         yuv_frame_;
 	std::unique_ptr<ffmpeg::AvBuffer> sws_buf_;
+	ffmpeg::BufferRefPtr    hw_device_ctx_;
 
 	int    stream_idx_ = -1;
 	double time_base_ = 0.0;
 	bool   needs_conversion_ = false;
+	bool   hw_accel_active_ = false;
+	AVPixelFormat sws_src_fmt_ = AV_PIX_FMT_NONE;
+	AVPixelFormat hw_pix_fmt_ = AV_PIX_FMT_NONE;
+
+	// FFmpeg's get_format callback is a plain C function pointer with no user-data
+	// slot, so it can't capture `this` directly. AVCodecContext::opaque carries the
+	// owning Decoder instance across the callback instead.
+	static AVPixelFormat get_hw_format(AVCodecContext* ctx, const AVPixelFormat* pix_fmts) {
+		auto* self = static_cast<Decoder*>(ctx->opaque);
+		for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+			if (*p == self->hw_pix_fmt_) return *p;
+		}
+		LOG_WARN("Failed to get HW surface format, falling back to software");
+		return pix_fmts[0];
+	}
 };
 
 namespace wallpaper {
@@ -586,14 +698,25 @@ namespace wallpaper {
 
 			encCtx->framerate = fps;
 			encCtx->time_base = av_inv_q(fps);
-			encCtx->gop_size = 12;
+			// The output only ever plays back sequentially in a loop (Decoder::seek_start
+			// jumps to frame 0, never mid-stream), so we don't need frequent keyframes for
+			// seeking. A large GOP with periodic keyframes keeps the file much smaller
+			// without hurting playback - keyframe every ~10s caps loop-restart cost.
+			int gopSize = static_cast<int>(std::lround(av_q2d(fps) * 10.0));
+			encCtx->gop_size = gopSize > 0 ? gopSize : 250;
 
 			if (outFmtCtx->oformat->flags & AVFMT_GLOBALHEADER) {
 				encCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 			}
 
-			av_opt_set(encCtx->priv_data, "preset", "ultrafast", 0);
-			av_opt_set(encCtx->priv_data, "tune", "zerolatency", 0);
+			// "ultrafast" produces noticeably larger files for the same quality than
+			// "fast"/"veryfast", and the video will be re-read from disk on every loop
+			// iteration for as long as the wallpaper runs - so it's worth spending a
+			// bit more time on this one-off transcode to get a smaller, cheaper-to-read
+			// file. "zerolatency" is meant for live streaming (disables B-frames), which
+			// only hurts compression here since we're writing to a file, not streaming.
+			av_opt_set(encCtx->priv_data, "preset", "fast", 0);
+			av_opt_set(encCtx->priv_data, "crf", "23", 0);
 
 			if (avcodec_open2(encCtx, encoder, nullptr) < 0 || avcodec_parameters_from_context(outStream->codecpar, encCtx) < 0) {
 				throw std::runtime_error("Failed to open or configure the encoder.");
@@ -807,8 +930,11 @@ public:
 				}
 			}
 
+			// Fine-grained wait for the remaining <2ms. A background wallpaper
+			// doesn't need microsecond-accurate presentation, so we yield the
+			// CPU instead of spinning it at 100% on one core every frame.
 			while ((static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq - wall_origin) < frame_time) {
-
+				std::this_thread::yield();
 			}
 
 			upload_and_present(texture.get(), frame);

@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/lwallpaperGUI"/>
+    <qresource prefix="/icons">
+        <file>lwallpaperGUI.ico</file>
+    </qresource>
+</RCC>

@@ -1,0 +1,67 @@
+# --- Visual Studio ---
+.vs/
+*.aps
+*.ncb
+*.opendb
+*.suo
+*.user
+*.vspx
+*.vsp
+
+# --- Build artifacts (x64/Debug, etc.) ---
+x64/
+Debug/
+Release/
+*.obj
+*.o
+*.idb
+*.pdb
+*.ilk
+*.lib
+*.exe
+*.dll
+*.manifest
+*.res
+*.tlog
+*.log
+*.lastbuildstate
+
+# --- Qt ---
+*.pro.user
+*.qm
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+Makefile*
+.qmake.stash
+
+# --- CMake ---
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeLists.txt.user
+
+# --- Redistributable installers (keep if you want) ---
+VC_redist.x64.exe
+VC_redist.x86.exe
+
+# --- SDL3 dev package (can be redownloaded) ---
+SDL3-devel-*/
+SDL3-*/
+
+# --- Assets (uncomment if you want to exclude) ---
+# *.ico
+# *.png
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Editor ---
+.vscode/
+*.swp
+*.swo
+*~

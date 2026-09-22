@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>lwallpaperGUIClass</class>
+ <widget class="QMainWindow" name="lwallpaperGUIClass">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>650</width>
+    <height>450</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Live Wallpaper Manager</string>
+  </property>
+  <property name="styleSheet">
+   <string notr="true">/* ==========================================================================
+   ГОЛОВНЕ ВІКНО ТА ЦЕНТРАЛЬНИЙ ВІДЖЕТ
+   ========================================================================== */
+QMainWindow, QWidget#centralWidget {
+    background-color: #FFF5F7; /* М'який пастельно-рожевий фон */
+    font-family: &quot;Segoe UI&quot;, &quot;Helvetica Neue&quot;, Arial, sans-serif;
+}
+
+/* ==========================================================================
+   СПИСОК ВІДЕО (QListWidget)
+   ========================================================================== */
+QListWidget {
+    background-color: #FFFFFF; /* Чистий білий колір для контрасту */
+    border: 2px solid #FAD0DD;  /* Акуратна світло-рожева рамка */
+    border-radius: 12px;        /* Закруглені кути */
+    padding: 8px;
+    color: #4A3E41;             /* Темно-сірий текст із теплим підтоном */
+    font-size: 14px;
+    outline: 0;                 /* Прибираємо рамку фокусу навколо елементів */
+}
+
+/* Елементи списку */
+QListWidget::item {
+    padding: 10px 12px;
+    border-radius: 8px;
+    margin-bottom: 4px;
+    color: #5A4B4E;
+}
+
+/* Наведення курсору на елемент списку */
+QListWidget::item:hover {
+    background-color: #FFE3EA;  /* Легкий рожевий відтінок */
+    color: #2B1F21;
+}
+
+/* Виділений (активний) елемент у списку */
+QListWidget::item:selected {
+    background-color: #FF9EBB;  /* Насичений рожевий акцент */
+    color: #FFFFFF;             /* Білий текст для читаємості */
+    font-weight: 600;
+}
+
+/* ==========================================================================
+   ЗАГАЛЬНІ СТИЛІ ДЛЯ КНОПОК (QPushButton)
+   ========================================================================== */
+QPushButton {
+    background-color: #FFAECA;  /* Базовий приємний рожевий */
+    color: #FFFFFF;
+    border: none;
+    border-radius: 10px;        /* Закруглені кути кнопок */
+    font-size: 13px;
+    font-weight: bold;
+}
+
+/* Ефекти для звичайних кнопок (Старт / Додати) */
+QPushButton:hover {
+    background-color: #FF8FAB;  /* Темніший при наведенні */
+}
+
+QPushButton:pressed {
+    background-color: #FB6F92;  /* Глибокий рожевий при натисканні */
+}
+
+/* ==========================================================================
+   ОКРЕМІ СТИЛІ ДЛЯ КНОПОК &quot;Зупинити&quot; ТА &quot;Видалити&quot;
+   ========================================================================== */
+QPushButton#pushButtonStop, QPushButton#pushButtonDelete {
+    background-color: #F4C2D1;  /* Більш спокійний, приглушений відтінок */
+}
+
+QPushButton#pushButtonStop:hover, QPushButton#pushButtonDelete:hover {
+    background-color: #ECB3C4; 
+}
+
+QPushButton#pushButtonStop:pressed, QPushButton#pushButtonDelete:pressed {
+    background-color: #D898AA; 
+}
+
+/* ==========================================================================
+   СТАН ВИМКНЕНОЇ КНОПКИ (коли в коді setEnabled(false))
+   ========================================================================== */
+QPushButton:disabled, 
+QPushButton#pushButtonStop:disabled, 
+QPushButton#pushButtonDelete:disabled {
+    background-color: #E8DFE2;  /* Нейтральний сіро-рожевий колір */
+    color: #A89FA2;             /* Тьмяний текст */
+}
+
+/* ==========================================================================
+   СМУГА ПРОКРУТКИ (QScrollBar)
+   ========================================================================== */
+QScrollBar:vertical {
+    border: none;
+    background: #FFF5F7;
+    width: 8px;
+    margin: 4px 0 4px 0;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical {
+    background: #FAD0DD;
+    min-height: 20px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #FF9EBB;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    background: none;
+    border: none;
+}</string>
+  </property>
+  <property name="dockOptions">
+   <set>QMainWindow::DockOption::AllowTabbedDocks|QMainWindow::DockOption::AnimatedDocks</set>
+  </property>
+  <widget class="QWidget" name="centralWidget">
+   <layout class="QGridLayout" name="gridLayout">
+    <property name="leftMargin">
+     <number>11</number>
+    </property>
+    <property name="topMargin">
+     <number>11</number>
+    </property>
+    <property name="rightMargin">
+     <number>11</number>
+    </property>
+    <property name="bottomMargin">
+     <number>11</number>
+    </property>
+    <property name="spacing">
+     <number>6</number>
+    </property>
+    <item row="0" column="0" rowspan="5">
+     <widget class="QListWidget" name="listWidget">
+      <property name="toolTip">
+       <string>Оберіть відео зі списку для запуску</string>
+      </property>
+     </widget>
+    </item>
+    <item row="0" column="1">
+     <widget class="QPushButton" name="pushButtonStart">
+      <property name="minimumSize">
+       <size>
+        <width>160</width>
+        <height>40</height>
+       </size>
+      </property>
+      <property name="text">
+       <string>Запустити шпалери</string>
+      </property>
+     </widget>
+    </item>
+    <item row="1" column="1">
+     <widget class="QPushButton" name="pushButtonStop">
+      <property name="minimumSize">
+       <size>
+        <width>160</width>
+        <height>40</height>
+       </size>
+      </property>
+      <property name="text">
+       <string>Зупинити</string>
+      </property>
+     </widget>
+    </item>
+    <item row="2" column="1">
+     <widget class="QPushButton" name="pushButtonAdd">
+      <property name="minimumSize">
+       <size>
+        <width>160</width>
+        <height>40</height>
+       </size>
+      </property>
+      <property name="text">
+       <string>Додати нове відео...</string>
+      </property>
+     </widget>
+    </item>
+    <item row="3" column="1">
+     <widget class="QPushButton" name="pushButtonDelete">
+      <property name="minimumSize">
+       <size>
+        <width>160</width>
+        <height>40</height>
+       </size>
+      </property>
+      <property name="text">
+       <string>Видалити шпалери</string>
+      </property>
+     </widget>
+    </item>
+    <item row="4" column="1">
+     <spacer name="verticalSpacer">
+      <property name="orientation">
+       <enum>Qt::Orientation::Vertical</enum>
+      </property>
+      <property name="sizeHint" stdset="0">
+       <size>
+        <width>20</width>
+        <height>40</height>
+       </size>
+      </property>
+     </spacer>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QMenuBar" name="menuBar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>650</width>
+     <height>21</height>
+    </rect>
+   </property>
+  </widget>
+  <widget class="QToolBar" name="mainToolBar">
+   <attribute name="toolBarArea">
+    <enum>TopToolBarArea</enum>
+   </attribute>
+   <attribute name="toolBarBreak">
+    <bool>false</bool>
+   </attribute>
+  </widget>
+  <widget class="QStatusBar" name="statusBar"/>
+ </widget>
+ <layoutdefault spacing="6" margin="11"/>
+ <resources>
+  <include location="lwallpaperGUI.qrc"/>
+ </resources>
+ <connections/>
+</ui>

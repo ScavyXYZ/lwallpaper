@@ -1,3 +1,4 @@
 lwallpaperGUI/ffmpeg/bin/*.dll filter=lfs diff=lfs merge=lfs -text
-lwallpaperGUI/ffmpeg/bin/*.exe filter=lfs diff=lfs merge=lfs -text
 lwallpaperGUI/ffmpeg/lib/*.lib filter=lfs diff=lfs merge=lfs -text
+lwallpaperGUI/SDL3-devel-3.4.2-VC/**/*.dll filter=lfs diff=lfs merge=lfs -text
+lwallpaperGUI/SDL3-devel-3.4.2-VC/**/*.lib filter=lfs diff=lfs merge=lfs -text

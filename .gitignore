@@ -1,120 +1,15 @@
-# ============================================================
-#  lwallpaper — .gitignore
-#  FFmpeg: трекаємо bin/ (DLL), include/ (заголовки), lib/ (лінковка)
-#  FFmpeg: НЕ трекаємо doc/ і presets/
-# ============================================================
-
-# --- Visual Studio ---
 .vs/
-*.aps
-*.ncb
-*.opendb
-*.suo
-*.user
-*.vspx
-*.vsp
-*.VC.db
-*.VC.VC.opendb
-*.sln.docstates
-
-# --- Build artifacts (MSVC) ---
-x64/
-x86/
-Debug/
-Release/
-RelWithDebInfo/
-MinSizeRel/
-obj/
-**/obj/
 Output/
+x64/
+obj/
 
-*.obj
-*.o
-*.idb
-*.pdb
-*.ilk
-*.exp
-*.tlog
-*.log
-*.lastbuildstate
-*.recipe
-*.iobj
-*.ipdb
-*.ifc
-*.ifc.dt.d.json
-*.ifc.dt.module.json
-*.ifc.dt.module.json.command
-*.tmp
-*.cache
+lwallpaperGUI/ffmpeg/doc/
+lwallpaperGUI/ffmpeg/presets/
+lwallpaperGUI/obj/
+lwallpaperGUI/x64/
 
-# --- Qt ---
-*.pro.user
-*.pro.user.*
-*.qm
-moc_*.cpp
-moc_*.h
-qrc_*.cpp
-ui_*.h
-*.qmlc
-*.jsc
-Makefile*
-.qmake.stash
-*.moc
-*.qmlproject.user
-
-# --- CMake ---
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-CMakeLists.txt.user
-CTestTestfile.cmake
-install_manifest.txt
-Testing/
-
-# --- FFmpeg: ігноруємо те, що не потрібно ---
-**/ffmpeg/presets/
-**/ffmpeg/doc/
-
-# --- Runtime state ---
-lwallpaperGUI/last_wallpaper.txt
-last_wallpaper.txt
-
-# --- Redistributable installers ---
-VC_redist.x64.exe
-VC_redist.x86.exe
-
-# --- SDL3 dev package ---
-SDL3-devel-*/
-SDL3-*/
-
-# --- OS ---
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-desktop.ini
-
-# --- Editor ---
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-*.bak
-*.orig
-*.rej
-
-# --- Logs / temp ---
-*.tmp
-*.temp
-*.pid
-*.seed
-*.pid.lock
-
-# --- Environment / secrets ---
-.env
-.env.local
-*.local
+*.vsxproj.filters
+*.vsxproj.user
+*.vcxproj.user
+*.aps
+*.exe

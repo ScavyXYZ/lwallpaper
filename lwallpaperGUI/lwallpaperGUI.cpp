@@ -7,6 +7,26 @@
 #include <QTextStream>
 #include <QProgressDialog>
 #include <QStandardPaths>
+#include <QApplication>
+#include <windows.h>
+
+ShowRequestFilter::ShowRequestFilter(lwallpaperGUI* window)
+	: m_window(window)
+{
+	m_showMessageId = RegisterWindowMessageW(L"LWallpaperGUI-ShowExistingInstance-8F3E2B1A");
+}
+
+bool ShowRequestFilter::nativeEventFilter(const QByteArray& eventType, void* message, qintptr* result)
+{
+	Q_UNUSED(eventType);
+	Q_UNUSED(result);
+	MSG* msg = static_cast<MSG*>(message);
+	if (msg->message == m_showMessageId) {
+		m_window->bringToFront();
+		return true;
+	}
+	return false;
+}
 
 lwallpaperGUI::lwallpaperGUI(QWidget* parent)
 	: QMainWindow(parent)
@@ -48,7 +68,7 @@ lwallpaperGUI::lwallpaperGUI(QWidget* parent)
 	m_trayMenu->addSeparator();
 	QAction* quitAction = m_trayMenu->addAction("Exit");
 
-	connect(showAction, &QAction::triggered, this, &lwallpaperGUI::showNormal);
+	connect(showAction, &QAction::triggered, this, &lwallpaperGUI::bringToFront);
 	connect(stopWallpaperAction, &QAction::triggered, this, &lwallpaperGUI::on_pushButtonStop_clicked);
 	connect(quitAction, &QAction::triggered, qApp, &QCoreApplication::quit);
 
@@ -63,8 +83,7 @@ lwallpaperGUI::lwallpaperGUI(QWidget* parent)
 
 	connect(m_trayIcon, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
 		if (reason == QSystemTrayIcon::DoubleClick) {
-			this->showNormal();
-			this->activateWindow();
+			bringToFront();
 		}
 		});
 	ui.pushButtonStop->setEnabled(false);
@@ -72,6 +91,20 @@ lwallpaperGUI::lwallpaperGUI(QWidget* parent)
 
 lwallpaperGUI::~lwallpaperGUI()
 {
+}
+
+void lwallpaperGUI::bringToFront()
+{
+	this->setWindowState(this->windowState() & ~Qt::WindowMinimized);
+	this->showNormal();
+	this->raise();
+	this->activateWindow();
+}
+
+void lwallpaperGUI::installShowRequestFilter()
+{
+	m_showRequestFilter = std::make_unique<ShowRequestFilter>(this);
+	qApp->installNativeEventFilter(m_showRequestFilter.get());
 }
 
 void lwallpaperGUI::on_pushButtonStart_clicked()
@@ -111,8 +144,6 @@ void lwallpaperGUI::on_pushButtonStart_clicked()
 
 void lwallpaperGUI::updateDeleteButtonState()
 {
-	// Deleting is allowed for any video except the one currently playing -
-	// removing that file out from under the active decoder is unsafe.
 	QListWidgetItem* current = ui.listWidget->currentItem();
 	bool selectedIsPlaying = current && m_api->isActive(current->text());
 	ui.pushButtonDelete->setEnabled(!selectedIsPlaying);

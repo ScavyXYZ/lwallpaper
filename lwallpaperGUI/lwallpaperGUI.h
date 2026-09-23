@@ -4,8 +4,21 @@
 #include <QSystemTrayIcon>
 #include <QMenu>
 #include <QCloseEvent>
+#include <QAbstractNativeEventFilter>
+#include <memory>
 #include "ui_lwallpaperGUI.h"
 #include "wallpaper_api.hpp"
+
+class ShowRequestFilter : public QAbstractNativeEventFilter
+{
+public:
+    explicit ShowRequestFilter(class lwallpaperGUI* window);
+    bool nativeEventFilter(const QByteArray& eventType, void* message, qintptr* result) override;
+
+private:
+    class lwallpaperGUI* m_window;
+    unsigned int m_showMessageId;
+};
 
 class lwallpaperGUI : public QMainWindow
 {
@@ -16,6 +29,10 @@ public:
     ~lwallpaperGUI();
 
     void startLastWallpaperQuietly();
+
+    void installShowRequestFilter();
+
+    void bringToFront();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -33,4 +50,5 @@ private:
 
     QSystemTrayIcon* m_trayIcon;
     QMenu* m_trayMenu;
+    std::unique_ptr<ShowRequestFilter> m_showRequestFilter;
 };

@@ -66,6 +66,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
     <IncludePath>C:\Projects\lwallpaperGUI\lwallpaperGUI\ffmpeg\include;$(IncludePath)</IncludePath>
     <LibraryPath>C:\Projects\lwallpaperGUI\lwallpaperGUI\ffmpeg\lib;$(LibraryPath)</LibraryPath>
+    <TargetName>lwallpaper</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>

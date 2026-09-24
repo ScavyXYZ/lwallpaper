@@ -148,6 +148,7 @@ struct YUVFrame {
 	double pts_seconds{};
 	int width{};
 	int height{};
+	bool is_nv12{ false };
 
 	YUVFrame() : frame(nullptr) {}
 
@@ -219,6 +220,13 @@ public:
 		LOG_INFO("Decoder created for file: " << path);
 	}
 
+	// Lets the renderer tell the decoder whether it can display NV12 frames
+	// natively. Defaults to true (assume passthrough works); the renderer flips
+	// this to false after its first texture-creation attempt if the GPU/backend
+	// doesn't support NV12 streaming textures, so the decoder falls back to
+	// converting to YUV420P on the CPU for all subsequent frames.
+	std::atomic<bool> nv12_passthrough_ok{ true };
+
 	void start() {
 		open();
 		thread_ = std::thread(&Decoder::run, this);
@@ -277,6 +285,11 @@ private:
 		codec_ctx_->thread_count = 0;
 		codec_ctx_->thread_type = FF_THREAD_FRAME;
 
+		// The wallpaper plays continuously for as long as the desktop is up, so
+		// decoding cost is paid indefinitely rather than once. Try D3D11VA hardware
+		// decode first to offload that ongoing CPU/power cost to the GPU; if the
+		// codec, driver or hardware doesn't support it, fall back to software decode
+		// transparently - this must never be fatal.
 		try_enable_hw_decode(codec);
 
 		err = avcodec_open2(codec_ctx_.get(), codec, nullptr);
@@ -290,6 +303,10 @@ private:
 		LOG_INFO("Time base=" << time_base_);
 
 		if (hw_accel_active_) {
+			// codec_ctx_->pix_fmt is a hardware surface format here (e.g. D3D11), which
+			// swscale cannot consume directly. The real transferred format is only known
+			// once the first frame comes back from av_hwframe_transfer_data, so sws setup
+			// happens lazily in ensure_conversion_target() instead.
 			LOG_INFO("Hardware decode active, deferring conversion setup until first frame");
 			return;
 		}
@@ -407,6 +424,9 @@ private:
 				break;
 			}
 
+			// Hardware-decoded frames live in GPU memory (a D3D11 surface handle) and
+			// must be transferred to system memory before sws_scale or the SDL texture
+			// upload can touch their pixel data.
 			ffmpeg::FramePtr sw_frame;
 			AVFrame* decoded = frame;
 			if (hw_accel_active_ && frame->format == hw_pix_fmt_) {
@@ -420,14 +440,23 @@ private:
 			}
 
 			AVFrame* src = decoded;
-			if (needs_conversion_ && sws_ctx_) {
+			bool is_nv12 = (static_cast<AVPixelFormat>(decoded->format) == AV_PIX_FMT_NV12);
+			bool pass_through = is_nv12 && nv12_passthrough_ok.load();
+
+			if (is_nv12 && !pass_through && (needs_conversion_ == false || !sws_ctx_)) {
+				// Renderer just told us it can't display NV12 natively - force the
+				// conversion path on for this format instead of the passthrough one.
+				force_nv12_conversion(decoded);
+			}
+
+			if (needs_conversion_ && sws_ctx_ && !pass_through) {
 				sws_scale(sws_ctx_.get(), decoded->data, decoded->linesize,
 					0, decoded->height,
 					yuv_frame_->data, yuv_frame_->linesize);
 				src = yuv_frame_.get();
 			}
 
-			YUVFrame yf = build_yuv_frame(src, decoded);
+			YUVFrame yf = build_yuv_frame(src, decoded, pass_through);
 			if (!queue_.push(std::move(yf), cancelled_)) break;
 			frame_count++;
 			if (frame_count % 100 == 0) {
@@ -436,6 +465,38 @@ private:
 		}
 	}
 
+	// Called only when the renderer has determined it can't display NV12 natively.
+	// Builds a real sws conversion path for NV12->YUV420P, overriding the default
+	// "NV12 needs no conversion" assumption from ensure_conversion_target.
+	void force_nv12_conversion(const AVFrame* nv12_frame) {
+		int w = nv12_frame->width, h = nv12_frame->height;
+		LOG_INFO("NV12 passthrough not supported by renderer, falling back to CPU conversion");
+
+		SwsContext* raw_sws = sws_getContext(w, h, AV_PIX_FMT_NV12,
+			codec_ctx_->width, codec_ctx_->height, AV_PIX_FMT_YUV420P,
+			SWS_BILINEAR, nullptr, nullptr, nullptr);
+		if (!raw_sws) throw std::runtime_error("Cannot create SwsContext for NV12 fallback conversion.");
+		sws_ctx_.reset(raw_sws);
+		needs_conversion_ = true;
+		sws_src_fmt_ = AV_PIX_FMT_NV12;
+		sws_src_w_ = w;
+		sws_src_h_ = h;
+
+		yuv_frame_.reset(av_frame_alloc());
+		yuv_frame_->format = AV_PIX_FMT_YUV420P;
+		yuv_frame_->width = codec_ctx_->width;
+		yuv_frame_->height = codec_ctx_->height;
+		int sz = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, codec_ctx_->width, codec_ctx_->height, 1);
+		sws_buf_ = std::make_unique<ffmpeg::AvBuffer>(sz);
+		av_image_fill_arrays(yuv_frame_->data, yuv_frame_->linesize,
+			sws_buf_->data, AV_PIX_FMT_YUV420P,
+			codec_ctx_->width, codec_ctx_->height, 1);
+	}
+
+	// D3D11VA-transferred frames typically come back as NV12, which differs from
+	// the codec's original pix_fmt that build_sws() was sized for at open() time.
+	// Lazily (re)build the sws context the first time we see the actual transferred
+	// format, since it isn't known until the first real frame arrives.
 	void ensure_conversion_target(const AVFrame* transferred) {
 		auto fmt = static_cast<AVPixelFormat>(transferred->format);
 		int w = transferred->width;
@@ -445,12 +506,20 @@ private:
 
 		LOG_INFO("HW frame format: " << av_get_pix_fmt_name(fmt) << ", size=" << w << "x" << h);
 
-		needs_conversion_ = (fmt != AV_PIX_FMT_YUV420P && fmt != AV_PIX_FMT_YUVJ420P);
+		// NV12 is passed straight through to the renderer now (no CPU color convert
+		// needed - the renderer either uploads it as a native NV12 texture or, as a
+		// fallback on GPUs/backends that don't support that, converts it itself).
+		needs_conversion_ = (fmt != AV_PIX_FMT_YUV420P && fmt != AV_PIX_FMT_YUVJ420P
+			&& fmt != AV_PIX_FMT_NV12);
 		sws_src_fmt_ = fmt;
 		sws_src_w_ = w;
 		sws_src_h_ = h;
 		if (!needs_conversion_) { sws_ctx_.reset(); return; }
 
+		// Use the transferred frame's own dimensions, not codec_ctx_'s: D3D11VA
+		// surfaces are commonly aligned/padded (e.g. height rounded up to a multiple
+		// of 32, so 1080 -> 1088), and sizing the SwsContext/output buffer from the
+		// logical codec_ctx_ size instead of the actual surface size corrupts the scale.
 		SwsContext* raw_sws = sws_getContext(w, h, fmt,
 			codec_ctx_->width, codec_ctx_->height, AV_PIX_FMT_YUV420P,
 			SWS_BILINEAR, nullptr, nullptr, nullptr);
@@ -468,10 +537,11 @@ private:
 			codec_ctx_->width, codec_ctx_->height, 1);
 	}
 
-	YUVFrame build_yuv_frame(AVFrame* src, AVFrame* original) const {
+	YUVFrame build_yuv_frame(AVFrame* src, AVFrame* original, bool is_nv12 = false) const {
 		YUVFrame yf;
 		yf.width = codec_ctx_->width;
 		yf.height = codec_ctx_->height;
+		yf.is_nv12 = is_nv12;
 
 		int64_t pts_raw = original->pts;
 		if (pts_raw == AV_NOPTS_VALUE) pts_raw = original->best_effort_timestamp;
@@ -515,6 +585,9 @@ private:
 	int    sws_src_h_ = 0;
 	AVPixelFormat hw_pix_fmt_ = AV_PIX_FMT_NONE;
 
+	// FFmpeg's get_format callback is a plain C function pointer with no user-data
+	// slot, so it can't capture `this` directly. AVCodecContext::opaque carries the
+	// owning Decoder instance across the callback instead.
 	static AVPixelFormat get_hw_format(AVCodecContext* ctx, const AVPixelFormat* pix_fmts) {
 		auto* self = static_cast<Decoder*>(ctx->opaque);
 		for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
@@ -688,6 +761,10 @@ namespace wallpaper {
 
 			encCtx->framerate = fps;
 			encCtx->time_base = av_inv_q(fps);
+			// The output only ever plays back sequentially in a loop (Decoder::seek_start
+			// jumps to frame 0, never mid-stream), so we don't need frequent keyframes for
+			// seeking. A large GOP with periodic keyframes keeps the file much smaller
+			// without hurting playback - keyframe every ~10s caps loop-restart cost.
 			int gopSize = static_cast<int>(std::lround(av_q2d(fps) * 10.0));
 			encCtx->gop_size = gopSize > 0 ? gopSize : 250;
 
@@ -695,6 +772,12 @@ namespace wallpaper {
 				encCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 			}
 
+			// "ultrafast" produces noticeably larger files for the same quality than
+			// "fast"/"veryfast", and the video will be re-read from disk on every loop
+			// iteration for as long as the wallpaper runs - so it's worth spending a
+			// bit more time on this one-off transcode to get a smaller, cheaper-to-read
+			// file. "zerolatency" is meant for live streaming (disables B-frames), which
+			// only hurts compression here since we're writing to a file, not streaming.
 			av_opt_set(encCtx->priv_data, "preset", "fast", 0);
 			av_opt_set(encCtx->priv_data, "crf", "23", 0);
 
@@ -864,9 +947,10 @@ public:
 	}
 
 	void run(FrameQueue& queue, std::atomic<bool>& cancelled,
-		std::atomic<bool>& decoder_done) {
+		std::atomic<bool>& decoder_done, std::atomic<bool>* nv12_ok = nullptr) {
 		LOG_INFO("Renderer main loop started");
 		sdl::TexturePtr texture;
+		bool texture_is_nv12 = false;
 
 		double perf_freq = static_cast<double>(SDL_GetPerformanceFrequency());
 		double pts_origin = -1.0;
@@ -890,10 +974,23 @@ public:
 			}
 			last_pts = frame.pts_seconds;
 
+			// (Re)create the texture on the first frame, or if the pixel format
+			// changed mid-stream - e.g. the decoder started in NV12 passthrough
+			// and then fell back to YUV420P after create_texture reported the GPU
+			// doesn't support NV12 streaming textures.
+			if (first_frame || frame.is_nv12 != texture_is_nv12) {
+				bool requested_nv12 = frame.is_nv12;
+				texture = create_texture(frame.width, frame.height, requested_nv12, nv12_ok);
+				// create_texture may have silently fallen back to IYUV even though
+				// NV12 was requested (and told the decoder via nv12_ok) - the texture
+				// we actually got determines how this and all subsequent frames until
+				// the decoder catches up must be uploaded, not what was requested.
+				texture_is_nv12 = requested_nv12 && (!nv12_ok || nv12_ok->load());
+			}
+
 			if (first_frame) {
 				pts_origin = frame.pts_seconds;
 				wall_origin = static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq;
-				texture = create_texture(frame.width, frame.height);
 				first_frame = false;
 			}
 
@@ -910,44 +1007,82 @@ public:
 				}
 			}
 
+			// Fine-grained wait for the remaining <2ms. A background wallpaper
+			// doesn't need microsecond-accurate presentation, so we yield the
+			// CPU instead of spinning it at 100% on one core every frame.
 			while ((static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq - wall_origin) < frame_time) {
 				std::this_thread::yield();
 			}
 
-			upload_and_present(texture.get(), frame);
+			upload_and_present(texture.get(), frame, texture_is_nv12);
 			frame_count++;
 		}
 		LOG_INFO("Renderer finished, total frames rendered: " << frame_count);
 	}
 
 private:
-	sdl::TexturePtr create_texture(int w, int h) {
+	sdl::TexturePtr create_texture(int w, int h, bool nv12, std::atomic<bool>* nv12_ok) {
 		SDL_Texture* raw = SDL_CreateTexture(renderer_.get(),
-			SDL_PIXELFORMAT_IYUV,
+			nv12 ? SDL_PIXELFORMAT_NV12 : SDL_PIXELFORMAT_IYUV,
 			SDL_TEXTUREACCESS_STREAMING,
 			w, h);
+
+		if (!raw && nv12) {
+			// This GPU/backend doesn't support NV12 streaming textures. Tell the
+			// decoder so it switches to converting to YUV420P on the CPU for all
+			// subsequent frames, then create the texture in that format instead.
+			LOG_WARN("NV12 texture creation failed (" << SDL_GetError() << "), falling back to YUV420P conversion");
+			if (nv12_ok) nv12_ok->store(false);
+			raw = SDL_CreateTexture(renderer_.get(),
+				SDL_PIXELFORMAT_IYUV,
+				SDL_TEXTUREACCESS_STREAMING,
+				w, h);
+		}
+
 		if (!raw) {
 			LOG_ERROR("SDL_CreateTexture failed: " << SDL_GetError());
 			throw std::runtime_error(std::string("SDL_CreateTexture: ") + SDL_GetError());
 		}
-		LOG_INFO("Texture created: " << w << "x" << h);
+		LOG_INFO("Texture created: " << w << "x" << h << ", format=" << (nv12 ? "NV12" : "IYUV"));
 		return sdl::TexturePtr(raw);
 	}
 
-	void upload_and_present(SDL_Texture* tex, const YUVFrame& frame) {
+	void upload_and_present(SDL_Texture* tex, const YUVFrame& frame, bool tex_is_nv12) {
 		const AVFrame* f = frame.frame.get();
 
-		if (!f->data[0] || !f->data[1] || !f->data[2]) {
-			LOG_WARN("upload_and_present: frame has null plane data, skipping");
+		if (frame.is_nv12 != tex_is_nv12) {
+			// Narrow race: this frame was produced before the decoder learned (via
+			// nv12_ok) that the texture fell back to IYUV, or vice versa. Its plane
+			// layout doesn't match what the texture expects - skip it rather than
+			// upload garbage; the very next frame will be in the correct format.
+			LOG_WARN("Skipping frame: format mismatch during NV12/IYUV texture transition");
 			return;
 		}
 
-		if (!SDL_UpdateYUVTexture(tex, nullptr,
-			f->data[0], f->linesize[0],
-			f->data[1], f->linesize[1],
-			f->data[2], f->linesize[2])) {
-			LOG_ERROR("SDL_UpdateYUVTexture failed: " << SDL_GetError());
-			return;
+		if (tex_is_nv12) {
+			if (!f->data[0] || !f->data[1]) {
+				LOG_WARN("upload_and_present: NV12 frame has null plane data, skipping");
+				return;
+			}
+			if (!SDL_UpdateNVTexture(tex, nullptr,
+				f->data[0], f->linesize[0],
+				f->data[1], f->linesize[1])) {
+				LOG_ERROR("SDL_UpdateNVTexture failed: " << SDL_GetError());
+				return;
+			}
+		}
+		else {
+			if (!f->data[0] || !f->data[1] || !f->data[2]) {
+				LOG_WARN("upload_and_present: frame has null plane data, skipping");
+				return;
+			}
+			if (!SDL_UpdateYUVTexture(tex, nullptr,
+				f->data[0], f->linesize[0],
+				f->data[1], f->linesize[1],
+				f->data[2], f->linesize[2])) {
+				LOG_ERROR("SDL_UpdateYUVTexture failed: " << SDL_GetError());
+				return;
+			}
 		}
 
 		if (!SDL_RenderTexture(renderer_.get(), tex, nullptr, nullptr)) {

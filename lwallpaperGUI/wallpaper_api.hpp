@@ -34,6 +34,8 @@ public slots:
 				parent = wallpaper::wallpaper_hwnd(m_w, m_h);
 			}
 			if (!parent) {
+				// Cancelled (e.g. Stop pressed) while still waiting for the desktop's
+				// WorkerW window - nothing was created yet, so just exit cleanly.
 				timeEndPeriod(1);
 				emit finished();
 				return;
@@ -51,7 +53,7 @@ public slots:
 			emit statusChanged("Wallpaper started.");
 			Renderer renderer(child_hwnd, m_w, m_h);
 
-			renderer.run(queue, m_cancelled, decoder.done_flag());
+			renderer.run(queue, m_cancelled, decoder.done_flag(), &decoder.nv12_passthrough_ok);
 
 			m_cancelled = true;
 			queue.cancel();
@@ -175,6 +177,8 @@ public:
 		m_activeFilename.clear();
 	}
 
+	// True while `filename` is the one currently being decoded/rendered. Used to
+	// stop the user from deleting a video file out from under an active decoder.
 	bool isActive(const QString& filename) const {
 		return m_thread != nullptr && m_activeFilename == filename;
 	}

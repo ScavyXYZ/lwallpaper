@@ -135,6 +135,24 @@ float4 PSMain(VSOut input) : SV_TARGET {
 		bool present_frame(const AVFrame* frame) {
 			if (!valid_ || !frame || frame->format != AV_PIX_FMT_D3D11) return false;
 
+			// A D3D11 device only ever has ONE immediate context, so the context we
+			// render with is the very same one FFmpeg's D3D11VA decoder submits its
+			// decode work to - from the decoder thread. An ID3D11DeviceContext is not
+			// safe for concurrent use, so every D3D11 call made below has to be
+			// serialized against the decoder's via FFmpeg's hwaccel lock, which is
+			// exactly what that lock exists for. Guarding only the
+			// CopySubresourceRegion is not enough: the shader resource views, the
+			// Draw and the Present all touch the same context too, and leaving them
+			// unguarded makes the very first Present() block forever against the
+			// decoder thread - the wallpaper then never appears and the log just
+			// stops mid-frame, with no error.
+			struct LockGuard {
+				void (*unlock)(void*);
+				void* ctx;
+				~LockGuard() { if (unlock) unlock(ctx); }
+			} guard{ hw_unlock_, hw_lock_ctx_ };
+			if (hw_lock_) hw_lock_(hw_lock_ctx_);
+
 			auto* array_texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
 			auto slice = static_cast<UINT>(reinterpret_cast<intptr_t>(frame->data[1]));
 			if (!array_texture) return false;
@@ -142,14 +160,25 @@ float4 PSMain(VSOut input) : SV_TARGET {
 			D3D11_TEXTURE2D_DESC array_desc{};
 			array_texture->GetDesc(&array_desc);
 
+			// D3D11VA pads its surfaces out to macroblock boundaries, so a 1080p
+			// frame actually lives in a 1920x1088 texture whose bottom 8 rows are
+			// padding rather than picture. Copying (and therefore sampling) only the
+			// coded rows keeps the padding out of the image - otherwise those rows
+			// get stretched into the visible area and the picture is slightly too
+			// tall. Falls back to the full surface if the frame reports no height.
+			const UINT logical_height =
+				(frame->height > 0 && (UINT)frame->height < array_desc.Height)
+					? (UINT)frame->height : array_desc.Height;
+
 			if (!logged_format_once_) {
 				LOG_INFO("Zero-copy: decoder array texture format=" << static_cast<int>(array_desc.Format)
 					<< " size=" << array_desc.Width << "x" << array_desc.Height
-					<< " arraySize=" << array_desc.ArraySize << " bindFlags=" << array_desc.BindFlags);
+					<< " arraySize=" << array_desc.ArraySize << " bindFlags=" << array_desc.BindFlags
+					<< " coded=" << frame->width << "x" << frame->height);
 				logged_format_once_ = true;
 			}
 
-			if (!ensure_slice_copy_texture(array_desc)) return false;
+			if (!ensure_slice_copy_texture(array_desc, logical_height)) return false;
 
 			// Base D3D11_TEX2D_ARRAY_SRV (via ID3D11Device::CreateShaderResourceView)
 			// has no PlaneSlice field - that only exists on D3D11_TEX2D_ARRAY_SRV1,
@@ -160,10 +189,15 @@ float4 PSMain(VSOut input) : SV_TARGET {
 			// then build ordinary non-array Y/UV SRVs against that - format alone
 			// selects the plane there, which the base API does support directly.
 			UINT src_subresource = D3D11CalcSubresource(0, slice, 1);
-			if (hw_lock_) hw_lock_(hw_lock_ctx_);
+			D3D11_BOX src_box{};
+			src_box.left = 0;
+			src_box.top = 0;
+			src_box.front = 0;
+			src_box.right = array_desc.Width;
+			src_box.bottom = logical_height;
+			src_box.back = 1;
 			context_->CopySubresourceRegion(slice_copy_.Get(), 0, 0, 0, 0,
-				array_texture, src_subresource, nullptr);
-			if (hw_unlock_) hw_unlock_(hw_lock_ctx_);
+				array_texture, src_subresource, &src_box);
 
 			ComPtr<ID3D11ShaderResourceView> y_srv, uv_srv;
 			if (!make_plane_srv(slice_copy_.Get(), DXGI_FORMAT_R8_UNORM, y_srv)) return false;
@@ -175,9 +209,6 @@ float4 PSMain(VSOut input) : SV_TARGET {
 
 			ID3D11RenderTargetView* rtv = back_buffer_rtv_.Get();
 			context_->OMSetRenderTargets(1, &rtv, nullptr);
-
-			const float debug_red[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
-			context_->ClearRenderTargetView(rtv, debug_red);
 
 			D3D11_VIEWPORT vp{};
 			vp.Width = static_cast<float>(width_);
@@ -198,16 +229,13 @@ float4 PSMain(VSOut input) : SV_TARGET {
 			ID3D11ShaderResourceView* null_srvs[2] = { nullptr, nullptr };
 			context_->PSSetShaderResources(0, 2, null_srvs);
 
-			LOG_INFO("Zero-copy: about to Present");
-			// SyncInterval=0: SyncInterval=1 waits for a vblank/composition signal
-			// from DWM, but this swapchain lives on a WorkerW-child window behind
-			// the desktop, outside DWM's normal composited presentation path - it
-			// may never receive that signal, which is what caused Present to hang
-			// indefinitely in testing. Frame pacing is already handled by the
-			// pts-based wait loop in run_zero_copy_loop, so presenting immediately
-			// here doesn't risk flooding the GPU with uncapped frames.
+			// SyncInterval=0: frame pacing is already handled by the pts-based wait
+			// loop in run_zero_copy_loop, and waiting on a composition signal from a
+			// window that sits behind the desktop risks stalling indefinitely.
+			// No per-frame logging here on purpose - this runs 60+ times a second,
+			// and two log lines per frame (each taking a global mutex and formatting
+			// a timestamp) cost more than the frame does.
 			HRESULT hr = swapchain_->Present(0, 0);
-			LOG_INFO("Zero-copy: Present done, hr=" << std::to_string(static_cast<long>(hr)));
 			if (FAILED(hr)) {
 				last_error_ = "Present failed, hr=" + std::to_string(static_cast<long>(hr));
 				// A lost device is the one failure we don't try to recover from inline;
@@ -272,8 +300,16 @@ float4 PSMain(VSOut input) : SV_TARGET {
 			desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
 			desc.SampleDesc.Count = 1;
 			desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-			desc.BufferCount = 1;
-			desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+	
+			// The flip model is mandatory here, not a preference. With the legacy
+			// bitblt model (DXGI_SWAP_EFFECT_DISCARD, BufferCount 1) the swapchain is
+			// never bound as this WorkerW-child window's DWM redirection surface, so
+			// every Present() returns S_OK while DWM keeps compositing whatever was
+			// there before - i.e. the desktop's own wallpaper, with no error anywhere
+			// in the log to hint at it. FLIP_DISCARD hands the buffer to the compositor
+			// directly, which is the only thing that actually works behind the desktop.
+			desc.BufferCount = 2;
+			desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
 			HRESULT hr = factory->CreateSwapChainForHwnd(
 				device_.Get(), hwnd, &desc, nullptr, nullptr, &swapchain_);
@@ -371,15 +407,15 @@ float4 PSMain(VSOut input) : SV_TARGET {
 		// between the decoder's array texture and plane-specific SRVs. Only
 		// recreated if the source format/size actually changes (shouldn't happen
 		// mid-stream for one video, but a defensive check costs nothing here).
-		bool ensure_slice_copy_texture(const D3D11_TEXTURE2D_DESC& src_desc) {
-			if (slice_copy_ && slice_copy_w_ == src_desc.Width && slice_copy_h_ == src_desc.Height
+		bool ensure_slice_copy_texture(const D3D11_TEXTURE2D_DESC& src_desc, UINT height) {
+			if (slice_copy_ && slice_copy_w_ == src_desc.Width && slice_copy_h_ == height
 				&& slice_copy_fmt_ == src_desc.Format) {
 				return true;
 			}
 
 			D3D11_TEXTURE2D_DESC desc{};
 			desc.Width = src_desc.Width;
-			desc.Height = src_desc.Height;
+			desc.Height = height;
 			desc.MipLevels = 1;
 			desc.ArraySize = 1;
 			desc.Format = src_desc.Format;
@@ -396,7 +432,7 @@ float4 PSMain(VSOut input) : SV_TARGET {
 
 			slice_copy_ = tex;
 			slice_copy_w_ = src_desc.Width;
-			slice_copy_h_ = src_desc.Height;
+			slice_copy_h_ = height;
 			slice_copy_fmt_ = src_desc.Format;
 			return true;
 		}

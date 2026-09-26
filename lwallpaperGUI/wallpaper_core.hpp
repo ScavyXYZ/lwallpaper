@@ -54,7 +54,7 @@ extern "C" {
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 
-#define DEBUG_ENABLED 1
+#define DEBUG_ENABLED 0
 #if DEBUG_ENABLED
 #include <rang.hpp>
 #define LOG_INFO_ENABLED 1

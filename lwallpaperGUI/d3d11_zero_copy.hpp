@@ -1,28 +1,5 @@
 #pragma once
 
-// Zero-copy D3D11 rendering path for D3D11VA-decoded NV12 frames.
-//
-// Why this exists: SDL3's SDL_CreateTextureWithProperties can technically wrap
-// an external ID3D11Texture2D* via SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER,
-// but only as a plain 2D texture. FFmpeg's D3D11VA decoder normally hands back
-// frames backed by a slice of an *array* texture (AVFrame.data[0] = the array
-// ID3D11Texture2D*, AVFrame.data[1] = the array slice index as intptr_t), and
-// there's no public SDL API to bind a specific array slice when wrapping. So a
-// literal wrap through SDL either binds the wrong slice or fails outright.
-//
-// This module sidesteps that by owning a minimal D3D11 render pipeline of its
-// own: a device/context/swapchain created here (and handed to FFmpeg's hwaccel
-// so decode and render share one device, no cross-device copy), plus a tiny
-// pixel shader that samples the Y and UV planes of the correct array slice
-// directly and writes RGB to the swapchain back buffer. No frame data ever
-// touches system memory.
-//
-// Every initialization step can fail (old GPU, driver quirk, feature level too
-// low, shader compile issue). On any failure this class leaves itself in a
-// clearly non-functional state (is_valid() == false) and every method becomes
-// a safe no-op, so the caller can fall back to the existing SDL+NV12/YUV420P
-// CPU path without any special-casing beyond checking is_valid() once.
-
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
@@ -42,8 +19,6 @@ using Microsoft::WRL::ComPtr;
 
 namespace wallpaper {
 
-	// BT.709 limited-range NV12 -> full-range RGB. Matches libx264's default
-	// colorspace for HD content, which is what this project's transcoder produces.
 	inline const char* kNv12ToRgbShaderSrc = R"(
 Texture2D<float>  YPlane  : register(t0);
 Texture2D<float2> UVPlane : register(t1);
@@ -55,7 +30,6 @@ struct VSOut {
 };
 
 VSOut VSMain(uint id : SV_VertexID) {
-    // Fullscreen triangle, no vertex buffer needed.
     VSOut o;
     float2 pos = float2((id == 2) ? 3.0 : -1.0, (id == 1) ? 3.0 : -1.0);
     o.pos = float4(pos, 0.0, 1.0);
@@ -87,9 +61,6 @@ float4 PSMain(VSOut input) : SV_TARGET {
 		D3D11ZeroCopyRenderer(const D3D11ZeroCopyRenderer&) = delete;
 		D3D11ZeroCopyRenderer& operator=(const D3D11ZeroCopyRenderer&) = delete;
 
-		// Creates the device, swapchain (on hwnd, size w x h) and shader pipeline.
-		// Returns true only if every step succeeded; on false the object is fully
-		// torn down and is_valid() reports false, so the caller falls back safely.
 		bool initialize(HWND hwnd, int w, int h) {
 			if (!create_device()) { last_error_ = "device creation failed: " + last_error_; return false; }
 			if (!create_swapchain(hwnd, w, h)) { last_error_ = "swapchain creation failed: " + last_error_; destroy(); return false; }
@@ -104,48 +75,17 @@ float4 PSMain(VSOut input) : SV_TARGET {
 		bool is_valid() const { return valid_; }
 		const std::string& last_error() const { return last_error_; }
 
-		// Must be called once, after the decoder has confirmed zero-copy is active
-		// (its lock/unlock/lock_ctx are only valid then). These are FFmpeg's own
-		// D3D11VA synchronization primitives (documented default: an internal
-		// mutex when left unset) - present_frame takes this same lock around any
-		// direct D3D11 call that touches a decoder-owned surface, so it can't run
-		// concurrently with the decoder's own internal writes to the same pool.
-		// If never called (or passed all-null), present_frame proceeds unlocked -
-		// which is only safe if the caller has some other guarantee decode and
-		// present never overlap; the intended caller (run_zero_copy_loop) always
-		// calls this first, so that fallback exists only to keep present_frame
-		// from crashing if it's ever misused, not as a recommended mode.
 		void set_sync_callbacks(void (*lock)(void*), void (*unlock)(void*), void* lock_ctx) {
 			hw_lock_ = lock;
 			hw_unlock_ = unlock;
 			hw_lock_ctx_ = lock_ctx;
 		}
 
-		// The device FFmpeg's D3D11VA hwaccel should be told to use, so decoded
-		// surfaces live on the same device this renderer draws from (no cross-
-		// device copy). Call this before av_hwdevice_ctx_create-equivalent setup.
 		ID3D11Device* device() const { return device_.Get(); }
 
-		// Presents the given decoded D3D11 frame directly: frame->data[0] is the
-		// array ID3D11Texture2D*, frame->data[1] is the array slice index. Returns
-		// false (without throwing) if anything about the frame or a GPU call is
-		// unexpected - the caller should treat that as "this frame failed, try
-		// the next one" rather than a fatal error, since a single bad frame
-		// shouldn't take down playback.
 		bool present_frame(const AVFrame* frame) {
 			if (!valid_ || !frame || frame->format != AV_PIX_FMT_D3D11) return false;
 
-			// A D3D11 device only ever has ONE immediate context, so the context we
-			// render with is the very same one FFmpeg's D3D11VA decoder submits its
-			// decode work to - from the decoder thread. An ID3D11DeviceContext is not
-			// safe for concurrent use, so every D3D11 call made below has to be
-			// serialized against the decoder's via FFmpeg's hwaccel lock, which is
-			// exactly what that lock exists for. Guarding only the
-			// CopySubresourceRegion is not enough: the shader resource views, the
-			// Draw and the Present all touch the same context too, and leaving them
-			// unguarded makes the very first Present() block forever against the
-			// decoder thread - the wallpaper then never appears and the log just
-			// stops mid-frame, with no error.
 			struct LockGuard {
 				void (*unlock)(void*);
 				void* ctx;
@@ -160,12 +100,6 @@ float4 PSMain(VSOut input) : SV_TARGET {
 			D3D11_TEXTURE2D_DESC array_desc{};
 			array_texture->GetDesc(&array_desc);
 
-			// D3D11VA pads its surfaces out to macroblock boundaries, so a 1080p
-			// frame actually lives in a 1920x1088 texture whose bottom 8 rows are
-			// padding rather than picture. Copying (and therefore sampling) only the
-			// coded rows keeps the padding out of the image - otherwise those rows
-			// get stretched into the visible area and the picture is slightly too
-			// tall. Falls back to the full surface if the frame reports no height.
 			const UINT logical_height =
 				(frame->height > 0 && (UINT)frame->height < array_desc.Height)
 					? (UINT)frame->height : array_desc.Height;
@@ -180,14 +114,6 @@ float4 PSMain(VSOut input) : SV_TARGET {
 
 			if (!ensure_slice_copy_texture(array_desc, logical_height)) return false;
 
-			// Base D3D11_TEX2D_ARRAY_SRV (via ID3D11Device::CreateShaderResourceView)
-			// has no PlaneSlice field - that only exists on D3D11_TEX2D_ARRAY_SRV1,
-			// which needs ID3D11Device3::CreateShaderResourceView1 (D3D11.3). Rather
-			// than require that feature level, copy just this one array slice into a
-			// small single-layer texture (a GPU-to-GPU copy, no CPU involved, and
-			// far cheaper than the CPU transfer this whole path exists to avoid),
-			// then build ordinary non-array Y/UV SRVs against that - format alone
-			// selects the plane there, which the base API does support directly.
 			UINT src_subresource = D3D11CalcSubresource(0, slice, 1);
 			D3D11_BOX src_box{};
 			src_box.left = 0;
@@ -222,24 +148,12 @@ float4 PSMain(VSOut input) : SV_TARGET {
 			context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
 			context_->Draw(3, 0);
 
-			// Unbind the SRVs before Present so the next frame's CreateShaderResourceView
-			// on a texture that might otherwise still be bound doesn't trigger a D3D
-			// debug-layer warning (and, on some drivers, a stall) about a resource
-			// being simultaneously bound as input and pending write.
 			ID3D11ShaderResourceView* null_srvs[2] = { nullptr, nullptr };
 			context_->PSSetShaderResources(0, 2, null_srvs);
 
-			// SyncInterval=0: frame pacing is already handled by the pts-based wait
-			// loop in run_zero_copy_loop, and waiting on a composition signal from a
-			// window that sits behind the desktop risks stalling indefinitely.
-			// No per-frame logging here on purpose - this runs 60+ times a second,
-			// and two log lines per frame (each taking a global mutex and formatting
-			// a timestamp) cost more than the frame does.
 			HRESULT hr = swapchain_->Present(0, 0);
 			if (FAILED(hr)) {
 				last_error_ = "Present failed, hr=" + std::to_string(static_cast<long>(hr));
-				// A lost device is the one failure we don't try to recover from inline;
-				// the caller should stop using this renderer and fall back.
 				if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
 					valid_ = false;
 				}
@@ -300,14 +214,7 @@ float4 PSMain(VSOut input) : SV_TARGET {
 			desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
 			desc.SampleDesc.Count = 1;
 			desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-	
-			// The flip model is mandatory here, not a preference. With the legacy
-			// bitblt model (DXGI_SWAP_EFFECT_DISCARD, BufferCount 1) the swapchain is
-			// never bound as this WorkerW-child window's DWM redirection surface, so
-			// every Present() returns S_OK while DWM keeps compositing whatever was
-			// there before - i.e. the desktop's own wallpaper, with no error anywhere
-			// in the log to hint at it. FLIP_DISCARD hands the buffer to the compositor
-			// directly, which is the only thing that actually works behind the desktop.
+
 			desc.BufferCount = 2;
 			desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
@@ -379,12 +286,6 @@ float4 PSMain(VSOut input) : SV_TARGET {
 			return true;
 		}
 
-		// Builds an SRV for one plane (Y or UV, selected by `format`) of a plain
-		// (non-array) NV12 texture. Format alone selects the plane here - this is
-		// the documented approach for non-array NV12 textures and is what makes
-		// the intermediate slice-copy in present_frame necessary in the first
-		// place (the decoder's original texture is an array, which the base D3D11
-		// SRV API can't plane-select into directly - see present_frame).
 		bool make_plane_srv(ID3D11Texture2D* texture, DXGI_FORMAT format,
 			ComPtr<ID3D11ShaderResourceView>& out) {
 			D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
@@ -403,10 +304,6 @@ float4 PSMain(VSOut input) : SV_TARGET {
 			return true;
 		}
 
-		// Lazily (re)creates the single-slice copy target used as a stepping stone
-		// between the decoder's array texture and plane-specific SRVs. Only
-		// recreated if the source format/size actually changes (shouldn't happen
-		// mid-stream for one video, but a defensive check costs nothing here).
 		bool ensure_slice_copy_texture(const D3D11_TEXTURE2D_DESC& src_desc, UINT height) {
 			if (slice_copy_ && slice_copy_w_ == src_desc.Width && slice_copy_h_ == height
 				&& slice_copy_fmt_ == src_desc.Format) {
@@ -460,4 +357,4 @@ float4 PSMain(VSOut input) : SV_TARGET {
 		std::string last_error_;
 	};
 
-} // namespace wallpaper
+}

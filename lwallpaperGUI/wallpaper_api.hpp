@@ -35,8 +35,6 @@ public slots:
 				parent = wallpaper::wallpaper_hwnd(m_w, m_h);
 			}
 			if (!parent) {
-				// Cancelled (e.g. Stop pressed) while still waiting for the desktop's
-				// WorkerW window - nothing was created yet, so just exit cleanly.
 				timeEndPeriod(1);
 				emit finished();
 				return;
@@ -47,11 +45,6 @@ public slots:
 
 			FrameQueue queue(kFrameQueueCapacity);
 
-			// Try the zero-copy D3D11 render path first: it must be created (and its
-			// device known) before the decoder starts, since the decoder needs that
-			// device to share hwaccel with. If this fails for any reason - old GPU,
-			// driver quirk, shader compile issue - zero_copy is left invalid and we
-			// fall straight back to the existing SDL renderer below, unchanged.
 			wallpaper::D3D11ZeroCopyRenderer zero_copy;
 			bool zero_copy_ready = zero_copy.initialize(child_hwnd, m_w, m_h);
 			if (!zero_copy_ready) {
@@ -73,10 +66,6 @@ public slots:
 				run_zero_copy_loop(zero_copy, queue, decoder.done_flag());
 			}
 			else {
-				// Either zero-copy setup failed, or the decoder itself fell back to
-				// software/non-shared-device decode (e.g. no D3D11VA support at all) -
-				// either way frames in the queue are ordinary CPU-side YUV420P/NV12
-				// data, which only the SDL renderer's upload path understands.
 				Renderer renderer(child_hwnd, m_w, m_h);
 				renderer.run(queue, m_cancelled, decoder.done_flag(), &decoder.nv12_passthrough_ok);
 			}
@@ -106,16 +95,6 @@ signals:
 	void statusChanged(const QString& status);
 
 private:
-	// Same frame-pacing logic as Renderer::run() (wait until each frame's pts is
-	// due, presented via yield-based fine wait rather than a CPU-spinning busy
-	// loop), but presenting through the zero-copy D3D11 path instead of an SDL
-	// texture upload. If present_frame reports the renderer is no longer valid
-	// (e.g. device lost), this returns early; the caller treats that the same
-	// as normal queue exhaustion; the caller only reaches this method as a
-	// one-shot alternative to Renderer::run() and does not currently retry
-	// this playback session on the SDL path if it happens mid-stream, since a
-	// device-lost event significant enough to abort zero-copy is rare and the
-	// next Start click will simply re-negotiate the render path from scratch.
 	void run_zero_copy_loop(wallpaper::D3D11ZeroCopyRenderer& zero_copy,
 		FrameQueue& queue, std::atomic<bool>& decoder_done) {
 		double perf_freq = static_cast<double>(SDL_GetPerformanceFrequency());
@@ -156,9 +135,6 @@ private:
 			}
 
 			if (!frame.is_raw_hw_frame) {
-				// Shouldn't happen (the decoder only takes this render path when it
-				// confirmed zero-copy is active), but a mismatched frame here would
-				// otherwise be silently misinterpreted as a D3D11 surface. Skip it.
 				LOG_WARN("run_zero_copy_loop: got a non-raw-hw frame, skipping");
 				continue;
 			}
@@ -168,10 +144,6 @@ private:
 					LOG_ERROR("Zero-copy renderer lost (" << zero_copy.last_error() << "), stopping playback");
 					break;
 				}
-				// A single frame failing to present (e.g. a transient SRV creation
-				// error) isn't fatal - just skip it and keep going. Still log the
-				// first few so a persistent failure (as opposed to one bad frame)
-				// is visible instead of silently dropping every frame forever.
 				if (present_fail_count_ < 5) {
 					LOG_WARN("present_frame failed (" << zero_copy.last_error() << ")");
 				}
@@ -283,8 +255,6 @@ public:
 		m_activeFilename.clear();
 	}
 
-	// True while `filename` is the one currently being decoded/rendered. Used to
-	// stop the user from deleting a video file out from under an active decoder.
 	bool isActive(const QString& filename) const {
 		return m_thread != nullptr && m_activeFilename == filename;
 	}

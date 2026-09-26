@@ -1,12 +1,5 @@
 #pragma once
 
-// Must come before the extern "C" block below: libavutil/hwcontext_d3d11va.h
-// includes <d3d11.h> internally, and if that first happens inside extern "C",
-// D3D11's C++ operator overloads (operator==/!= for D3D11_VIEWPORT, D3D11_RECT,
-// D3D11_BOX, etc.) get pulled in with C linkage, which MSVC rejects outright
-// ("you cannot overload a function with 'extern C' linkage"). Including these
-// here first means the header include-guards make the later implicit include
-// from inside extern "C" a no-op, so the operators stay correctly C++-linked.
 #include <windows.h>
 #include <shellscalingapi.h>
 #include <d3d11.h>
@@ -163,9 +156,6 @@ struct YUVFrame {
 	int width{};
 	int height{};
 	bool is_nv12{ false };
-	// True when `frame` is still a raw, un-transferred D3D11 surface
-	// (format == AV_PIX_FMT_D3D11) rather than CPU-accessible plane data.
-	// Only meaningful when the zero-copy render path is active.
 	bool is_raw_hw_frame{ false };
 
 	YUVFrame() : frame(nullptr) {}
@@ -174,9 +164,6 @@ struct YUVFrame {
 	YUVFrame& operator=(YUVFrame&& other) noexcept = default;
 };
 
-// Shared between WallpaperWorker (constructs the queue with this) and Decoder
-// (sizes the D3D11VA hw frame pool for the zero-copy path so it can hold this
-// many surfaces without starving the decoder - see extra_hw_frames in open()).
 inline constexpr std::size_t kFrameQueueCapacity = 3;
 
 class FrameQueue {
@@ -243,37 +230,12 @@ public:
 		LOG_INFO("Decoder created for file: " << path);
 	}
 
-	// Lets the renderer tell the decoder whether it can display NV12 frames
-	// natively. Defaults to true (assume passthrough works); the renderer flips
-	// this to false after its first texture-creation attempt if the GPU/backend
-	// doesn't support NV12 streaming textures, so the decoder falls back to
-	// converting to YUV420P on the CPU for all subsequent frames.
 	std::atomic<bool> nv12_passthrough_ok{ true };
 
-	// When set (by the renderer, before start()), D3D11VA hwaccel is initialized
-	// on this externally-owned device instead of creating a private one. This is
-	// what makes true zero-copy possible: decoded surfaces and the renderer's
-	// shader resource views then live on the same D3D11 device, so the GPU
-	// texture can be sampled directly without any GPU<->CPU copy at all.
-	// Left null, the decoder creates and owns its own device as before.
 	ID3D11Device* external_d3d_device = nullptr;
 
-	// True only once open() has actually confirmed the zero-copy path is live
-	// (external_d3d_device was provided AND D3D11VA hwaccel initialized on it
-	// successfully). external_d3d_device being non-null does not by itself
-	// guarantee this - initialization can still fall back to a private device.
 	bool is_zero_copy_active() const { return zero_copy_capable_; }
 
-	// The D3D11VA device context's lock/unlock callbacks and lock_ctx, valid
-	// only when is_zero_copy_active() is true. FFmpeg documents that if left
-	// unset these default to an internal mutex that protects the decoder's own
-	// internal D3D11 calls (e.g. av_hwframe_transfer_data) - but that mutex
-	// does nothing for a caller (the zero-copy renderer) doing its own D3D11
-	// calls against the same shared device and surface pool from a different
-	// thread. The renderer must take this same lock around any direct GPU
-	// access to a decoded surface (e.g. CopySubresourceRegion reading from an
-	// array slice the decoder might concurrently be writing another frame
-	// into), or the two are racing with no coordination at all.
 	void (*hw_lock)(void* lock_ctx) = nullptr;
 	void (*hw_unlock)(void* lock_ctx) = nullptr;
 	void* hw_lock_ctx = nullptr;
@@ -336,19 +298,8 @@ private:
 		codec_ctx_->thread_count = 0;
 		codec_ctx_->thread_type = FF_THREAD_FRAME;
 
-		// The wallpaper plays continuously for as long as the desktop is up, so
-		// decoding cost is paid indefinitely rather than once. Try D3D11VA hardware
-		// decode first to offload that ongoing CPU/power cost to the GPU; if the
-		// codec, driver or hardware doesn't support it, fall back to software decode
-		// transparently - this must never be fatal.
 		try_enable_hw_decode(codec, external_d3d_device);
 
-		// The zero-copy path holds onto decoded surfaces (in the frame queue) for
-		// longer than the CPU path does, since nothing is copied out of them until
-		// the renderer presents and releases each one. FFmpeg's D3D11VA pool is
-		// otherwise sized only for the decoder's own internal needs (reference
-		// frames), so without this the queue could starve the decoder of free
-		// surfaces. Match it to the queue capacity plus a small safety margin.
 		if (zero_copy_capable_) {
 			codec_ctx_->extra_hw_frames = static_cast<int>(kFrameQueueCapacity) + 2;
 		}
@@ -364,10 +315,6 @@ private:
 		LOG_INFO("Time base=" << time_base_);
 
 		if (hw_accel_active_) {
-			// codec_ctx_->pix_fmt is a hardware surface format here (e.g. D3D11), which
-			// swscale cannot consume directly. The real transferred format is only known
-			// once the first frame comes back from av_hwframe_transfer_data, so sws setup
-			// happens lazily in ensure_conversion_target() instead.
 			LOG_INFO("Hardware decode active, deferring conversion setup until first frame");
 			return;
 		}
@@ -383,14 +330,6 @@ private:
 		}
 	}
 
-	// If shared_device is non-null, FFmpeg's D3D11VA hwaccel is initialized to
-	// use that existing device (AddRef'd; FFmpeg takes ownership of the ref)
-	// instead of creating its own - this is what lets decoded surfaces be
-	// rendered directly by a renderer that owns the same device, with no
-	// cross-device copy. If shared_device is null, or sharing fails, this
-	// falls back to FFmpeg creating and owning its own private D3D11 device
-	// (the original behavior), which still gets hwaccel decode but requires
-	// the CPU transfer path since the render side doesn't share the device.
 	void try_enable_hw_decode(const AVCodec* codec, ID3D11Device* shared_device = nullptr) {
 		for (int i = 0;; ++i) {
 			const AVCodecHWConfig* cfg = avcodec_get_hw_config(codec, i);
@@ -421,10 +360,6 @@ private:
 							raw_hw_ctx = nullptr;
 						}
 						else {
-							// FFmpeg fills in lock/unlock/lock_ctx with its internal mutex
-							// default during init if they were left unset (which they were
-							// here) - read them back so present_frame's direct D3D11 calls
-							// can be synchronized against the decoder's own internal ones.
 							hw_lock = d3d11_ctx->lock;
 							hw_unlock = d3d11_ctx->unlock;
 							hw_lock_ctx = d3d11_ctx->lock_ctx;
@@ -530,13 +465,6 @@ private:
 			}
 
 			if (zero_copy_capable_ && hw_accel_active_ && frame->format == hw_pix_fmt_) {
-				// Zero-copy path: the renderer shares this decoder's D3D11 device, so
-				// it can build a shader-resource view directly against this frame's
-				// GPU surface (frame->data[0] = array texture, data[1] = slice index)
-				// without any CPU involvement. We just keep the AVFrame reference alive
-				// in the queue - av_frame_ref bumps the underlying AVBufferRef refcount,
-				// so the GPU surface stays valid until the renderer is done with it and
-				// the YUVFrame is destroyed.
 				YUVFrame yf;
 				yf.frame.reset(av_frame_alloc());
 				av_frame_ref(yf.frame.get(), frame);
@@ -555,9 +483,6 @@ private:
 				continue;
 			}
 
-			// Hardware-decoded frames live in GPU memory (a D3D11 surface handle) and
-			// must be transferred to system memory before sws_scale or the SDL texture
-			// upload can touch their pixel data.
 			ffmpeg::FramePtr sw_frame;
 			AVFrame* decoded = frame;
 			if (hw_accel_active_ && frame->format == hw_pix_fmt_) {
@@ -575,8 +500,6 @@ private:
 			bool pass_through = is_nv12 && nv12_passthrough_ok.load();
 
 			if (is_nv12 && !pass_through && (needs_conversion_ == false || !sws_ctx_)) {
-				// Renderer just told us it can't display NV12 natively - force the
-				// conversion path on for this format instead of the passthrough one.
 				force_nv12_conversion(decoded);
 			}
 
@@ -596,9 +519,6 @@ private:
 		}
 	}
 
-	// Called only when the renderer has determined it can't display NV12 natively.
-	// Builds a real sws conversion path for NV12->YUV420P, overriding the default
-	// "NV12 needs no conversion" assumption from ensure_conversion_target.
 	void force_nv12_conversion(const AVFrame* nv12_frame) {
 		int w = nv12_frame->width, h = nv12_frame->height;
 		LOG_INFO("NV12 passthrough not supported by renderer, falling back to CPU conversion");
@@ -624,10 +544,6 @@ private:
 			codec_ctx_->width, codec_ctx_->height, 1);
 	}
 
-	// D3D11VA-transferred frames typically come back as NV12, which differs from
-	// the codec's original pix_fmt that build_sws() was sized for at open() time.
-	// Lazily (re)build the sws context the first time we see the actual transferred
-	// format, since it isn't known until the first real frame arrives.
 	void ensure_conversion_target(const AVFrame* transferred) {
 		auto fmt = static_cast<AVPixelFormat>(transferred->format);
 		int w = transferred->width;
@@ -637,9 +553,6 @@ private:
 
 		LOG_INFO("HW frame format: " << av_get_pix_fmt_name(fmt) << ", size=" << w << "x" << h);
 
-		// NV12 is passed straight through to the renderer now (no CPU color convert
-		// needed - the renderer either uploads it as a native NV12 texture or, as a
-		// fallback on GPUs/backends that don't support that, converts it itself).
 		needs_conversion_ = (fmt != AV_PIX_FMT_YUV420P && fmt != AV_PIX_FMT_YUVJ420P
 			&& fmt != AV_PIX_FMT_NV12);
 		sws_src_fmt_ = fmt;
@@ -647,10 +560,6 @@ private:
 		sws_src_h_ = h;
 		if (!needs_conversion_) { sws_ctx_.reset(); return; }
 
-		// Use the transferred frame's own dimensions, not codec_ctx_'s: D3D11VA
-		// surfaces are commonly aligned/padded (e.g. height rounded up to a multiple
-		// of 32, so 1080 -> 1088), and sizing the SwsContext/output buffer from the
-		// logical codec_ctx_ size instead of the actual surface size corrupts the scale.
 		SwsContext* raw_sws = sws_getContext(w, h, fmt,
 			codec_ctx_->width, codec_ctx_->height, AV_PIX_FMT_YUV420P,
 			SWS_BILINEAR, nullptr, nullptr, nullptr);
@@ -717,9 +626,6 @@ private:
 	int    sws_src_h_ = 0;
 	AVPixelFormat hw_pix_fmt_ = AV_PIX_FMT_NONE;
 
-	// FFmpeg's get_format callback is a plain C function pointer with no user-data
-	// slot, so it can't capture `this` directly. AVCodecContext::opaque carries the
-	// owning Decoder instance across the callback instead.
 	static AVPixelFormat get_hw_format(AVCodecContext* ctx, const AVPixelFormat* pix_fmts) {
 		auto* self = static_cast<Decoder*>(ctx->opaque);
 		for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
@@ -733,9 +639,6 @@ private:
 namespace wallpaper {
 	struct ScreenSize { int w, h; };
 
-	// Drains the Win32 message queue for the calling thread's windows (the
-	// wallpaper child window). Shared by both render paths - the zero-copy path
-	// has no SDL event loop to fall back on, so this is its only pump.
 	inline void pump_win32_events(std::atomic<bool>& cancelled) {
 		MSG msg;
 		while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -909,10 +812,6 @@ namespace wallpaper {
 
 			encCtx->framerate = fps;
 			encCtx->time_base = av_inv_q(fps);
-			// The output only ever plays back sequentially in a loop (Decoder::seek_start
-			// jumps to frame 0, never mid-stream), so we don't need frequent keyframes for
-			// seeking. A large GOP with periodic keyframes keeps the file much smaller
-			// without hurting playback - keyframe every ~10s caps loop-restart cost.
 			int gopSize = static_cast<int>(std::lround(av_q2d(fps) * 10.0));
 			encCtx->gop_size = gopSize > 0 ? gopSize : 250;
 
@@ -920,12 +819,6 @@ namespace wallpaper {
 				encCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 			}
 
-			// "ultrafast" produces noticeably larger files for the same quality than
-			// "fast"/"veryfast", and the video will be re-read from disk on every loop
-			// iteration for as long as the wallpaper runs - so it's worth spending a
-			// bit more time on this one-off transcode to get a smaller, cheaper-to-read
-			// file. "zerolatency" is meant for live streaming (disables B-frames), which
-			// only hurts compression here since we're writing to a file, not streaming.
 			av_opt_set(encCtx->priv_data, "preset", "fast", 0);
 			av_opt_set(encCtx->priv_data, "crf", "23", 0);
 
@@ -1122,17 +1015,9 @@ public:
 			}
 			last_pts = frame.pts_seconds;
 
-			// (Re)create the texture on the first frame, or if the pixel format
-			// changed mid-stream - e.g. the decoder started in NV12 passthrough
-			// and then fell back to YUV420P after create_texture reported the GPU
-			// doesn't support NV12 streaming textures.
 			if (first_frame || frame.is_nv12 != texture_is_nv12) {
 				bool requested_nv12 = frame.is_nv12;
 				texture = create_texture(frame.width, frame.height, requested_nv12, nv12_ok);
-				// create_texture may have silently fallen back to IYUV even though
-				// NV12 was requested (and told the decoder via nv12_ok) - the texture
-				// we actually got determines how this and all subsequent frames until
-				// the decoder catches up must be uploaded, not what was requested.
 				texture_is_nv12 = requested_nv12 && (!nv12_ok || nv12_ok->load());
 			}
 
@@ -1155,9 +1040,6 @@ public:
 				}
 			}
 
-			// Fine-grained wait for the remaining <2ms. A background wallpaper
-			// doesn't need microsecond-accurate presentation, so we yield the
-			// CPU instead of spinning it at 100% on one core every frame.
 			while ((static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq - wall_origin) < frame_time) {
 				std::this_thread::yield();
 			}
@@ -1176,9 +1058,6 @@ private:
 			w, h);
 
 		if (!raw && nv12) {
-			// This GPU/backend doesn't support NV12 streaming textures. Tell the
-			// decoder so it switches to converting to YUV420P on the CPU for all
-			// subsequent frames, then create the texture in that format instead.
 			LOG_WARN("NV12 texture creation failed (" << SDL_GetError() << "), falling back to YUV420P conversion");
 			if (nv12_ok) nv12_ok->store(false);
 			raw = SDL_CreateTexture(renderer_.get(),
@@ -1199,10 +1078,6 @@ private:
 		const AVFrame* f = frame.frame.get();
 
 		if (frame.is_nv12 != tex_is_nv12) {
-			// Narrow race: this frame was produced before the decoder learned (via
-			// nv12_ok) that the texture fell back to IYUV, or vice versa. Its plane
-			// layout doesn't match what the texture expects - skip it rather than
-			// upload garbage; the very next frame will be in the correct format.
 			LOG_WARN("Skipping frame: format mismatch during NV12/IYUV texture transition");
 			return;
 		}

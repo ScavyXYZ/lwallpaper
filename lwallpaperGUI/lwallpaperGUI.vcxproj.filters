@@ -51,6 +51,9 @@
     <ClInclude Include="wallpaper_core.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="d3d11_zero_copy.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="wallpaper_api.hpp">

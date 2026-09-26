@@ -1,5 +1,19 @@
 #pragma once
 
+// Must come before the extern "C" block below: libavutil/hwcontext_d3d11va.h
+// includes <d3d11.h> internally, and if that first happens inside extern "C",
+// D3D11's C++ operator overloads (operator==/!= for D3D11_VIEWPORT, D3D11_RECT,
+// D3D11_BOX, etc.) get pulled in with C linkage, which MSVC rejects outright
+// ("you cannot overload a function with 'extern C' linkage"). Including these
+// here first means the header include-guards make the later implicit include
+// from inside extern "C" a no-op, so the operators stay correctly C++-linked.
+#include <windows.h>
+#include <shellscalingapi.h>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <dxgi1_2.h>
+#include <wrl/client.h>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -8,11 +22,10 @@ extern "C" {
 #include <libavutil/time.h>
 #include <libavutil/opt.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d11va.h>
 }
 
 #include <SDL3/SDL.h>
-#include <windows.h>
-#include <shellscalingapi.h>
 
 #include <atomic>
 #include <chrono>
@@ -39,8 +52,9 @@ extern "C" {
 #pragma comment(lib, "shcore.lib")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "d3dcompiler.lib")
 
-#define DEBUG_ENABLED 0
+#define DEBUG_ENABLED 1
 #if DEBUG_ENABLED
 #include <rang.hpp>
 #define LOG_INFO_ENABLED 1
@@ -149,12 +163,21 @@ struct YUVFrame {
 	int width{};
 	int height{};
 	bool is_nv12{ false };
+	// True when `frame` is still a raw, un-transferred D3D11 surface
+	// (format == AV_PIX_FMT_D3D11) rather than CPU-accessible plane data.
+	// Only meaningful when the zero-copy render path is active.
+	bool is_raw_hw_frame{ false };
 
 	YUVFrame() : frame(nullptr) {}
 
 	YUVFrame(YUVFrame&& other) noexcept = default;
 	YUVFrame& operator=(YUVFrame&& other) noexcept = default;
 };
+
+// Shared between WallpaperWorker (constructs the queue with this) and Decoder
+// (sizes the D3D11VA hw frame pool for the zero-copy path so it can hold this
+// many surfaces without starving the decoder - see extra_hw_frames in open()).
+inline constexpr std::size_t kFrameQueueCapacity = 3;
 
 class FrameQueue {
 public:
@@ -227,6 +250,34 @@ public:
 	// converting to YUV420P on the CPU for all subsequent frames.
 	std::atomic<bool> nv12_passthrough_ok{ true };
 
+	// When set (by the renderer, before start()), D3D11VA hwaccel is initialized
+	// on this externally-owned device instead of creating a private one. This is
+	// what makes true zero-copy possible: decoded surfaces and the renderer's
+	// shader resource views then live on the same D3D11 device, so the GPU
+	// texture can be sampled directly without any GPU<->CPU copy at all.
+	// Left null, the decoder creates and owns its own device as before.
+	ID3D11Device* external_d3d_device = nullptr;
+
+	// True only once open() has actually confirmed the zero-copy path is live
+	// (external_d3d_device was provided AND D3D11VA hwaccel initialized on it
+	// successfully). external_d3d_device being non-null does not by itself
+	// guarantee this - initialization can still fall back to a private device.
+	bool is_zero_copy_active() const { return zero_copy_capable_; }
+
+	// The D3D11VA device context's lock/unlock callbacks and lock_ctx, valid
+	// only when is_zero_copy_active() is true. FFmpeg documents that if left
+	// unset these default to an internal mutex that protects the decoder's own
+	// internal D3D11 calls (e.g. av_hwframe_transfer_data) - but that mutex
+	// does nothing for a caller (the zero-copy renderer) doing its own D3D11
+	// calls against the same shared device and surface pool from a different
+	// thread. The renderer must take this same lock around any direct GPU
+	// access to a decoded surface (e.g. CopySubresourceRegion reading from an
+	// array slice the decoder might concurrently be writing another frame
+	// into), or the two are racing with no coordination at all.
+	void (*hw_lock)(void* lock_ctx) = nullptr;
+	void (*hw_unlock)(void* lock_ctx) = nullptr;
+	void* hw_lock_ctx = nullptr;
+
 	void start() {
 		open();
 		thread_ = std::thread(&Decoder::run, this);
@@ -290,7 +341,17 @@ private:
 		// decode first to offload that ongoing CPU/power cost to the GPU; if the
 		// codec, driver or hardware doesn't support it, fall back to software decode
 		// transparently - this must never be fatal.
-		try_enable_hw_decode(codec);
+		try_enable_hw_decode(codec, external_d3d_device);
+
+		// The zero-copy path holds onto decoded surfaces (in the frame queue) for
+		// longer than the CPU path does, since nothing is copied out of them until
+		// the renderer presents and releases each one. FFmpeg's D3D11VA pool is
+		// otherwise sized only for the decoder's own internal needs (reference
+		// frames), so without this the queue could starve the decoder of free
+		// surfaces. Match it to the queue capacity plus a small safety margin.
+		if (zero_copy_capable_) {
+			codec_ctx_->extra_hw_frames = static_cast<int>(kFrameQueueCapacity) + 2;
+		}
 
 		err = avcodec_open2(codec_ctx_.get(), codec, nullptr);
 		if (err < 0)
@@ -322,7 +383,15 @@ private:
 		}
 	}
 
-	void try_enable_hw_decode(const AVCodec* codec) {
+	// If shared_device is non-null, FFmpeg's D3D11VA hwaccel is initialized to
+	// use that existing device (AddRef'd; FFmpeg takes ownership of the ref)
+	// instead of creating its own - this is what lets decoded surfaces be
+	// rendered directly by a renderer that owns the same device, with no
+	// cross-device copy. If shared_device is null, or sharing fails, this
+	// falls back to FFmpeg creating and owning its own private D3D11 device
+	// (the original behavior), which still gets hwaccel decode but requires
+	// the CPU transfer path since the render side doesn't share the device.
+	void try_enable_hw_decode(const AVCodec* codec, ID3D11Device* shared_device = nullptr) {
 		for (int i = 0;; ++i) {
 			const AVCodecHWConfig* cfg = avcodec_get_hw_config(codec, i);
 			if (!cfg) {
@@ -331,18 +400,54 @@ private:
 			}
 			if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
 				cfg->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
+
 				AVBufferRef* raw_hw_ctx = nullptr;
-				int err = av_hwdevice_ctx_create(&raw_hw_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
-				if (err < 0) {
-					LOG_WARN("D3D11VA device creation failed: " << ffmpeg::av_error(err) << ", using software decode");
-					return;
+
+				if (shared_device) {
+					raw_hw_ctx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+					if (!raw_hw_ctx) {
+						LOG_WARN("av_hwdevice_ctx_alloc failed, falling back to private D3D11VA device");
+					}
+					else {
+						auto* device_ctx = reinterpret_cast<AVHWDeviceContext*>(raw_hw_ctx->data);
+						auto* d3d11_ctx = static_cast<AVD3D11VADeviceContext*>(device_ctx->hwctx);
+						shared_device->AddRef();
+						d3d11_ctx->device = shared_device;
+
+						int err = av_hwdevice_ctx_init(raw_hw_ctx);
+						if (err < 0) {
+							LOG_WARN("av_hwdevice_ctx_init (shared device) failed: " << ffmpeg::av_error(err) << ", falling back to private D3D11VA device");
+							av_buffer_unref(&raw_hw_ctx);
+							raw_hw_ctx = nullptr;
+						}
+						else {
+							// FFmpeg fills in lock/unlock/lock_ctx with its internal mutex
+							// default during init if they were left unset (which they were
+							// here) - read them back so present_frame's direct D3D11 calls
+							// can be synchronized against the decoder's own internal ones.
+							hw_lock = d3d11_ctx->lock;
+							hw_unlock = d3d11_ctx->unlock;
+							hw_lock_ctx = d3d11_ctx->lock_ctx;
+							LOG_INFO("D3D11VA hwaccel sharing renderer's device (zero-copy path enabled)");
+						}
+					}
 				}
+
+				if (!raw_hw_ctx) {
+					int err = av_hwdevice_ctx_create(&raw_hw_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
+					if (err < 0) {
+						LOG_WARN("D3D11VA device creation failed: " << ffmpeg::av_error(err) << ", using software decode");
+						return;
+					}
+				}
+
 				hw_device_ctx_.reset(raw_hw_ctx);
 				codec_ctx_->hw_device_ctx = av_buffer_ref(hw_device_ctx_.get());
 				hw_pix_fmt_ = cfg->pix_fmt;
 				codec_ctx_->opaque = this;
 				codec_ctx_->get_format = &Decoder::get_hw_format;
 				hw_accel_active_ = true;
+				zero_copy_capable_ = (shared_device != nullptr) && (codec_ctx_->hw_device_ctx != nullptr);
 				LOG_INFO("D3D11VA hardware decode enabled for codec " << codec->name);
 				return;
 			}
@@ -422,6 +527,32 @@ private:
 			if (ret < 0) {
 				LOG_WARN("avcodec_receive_frame error: " << ffmpeg::av_error(ret));
 				break;
+			}
+
+			if (zero_copy_capable_ && hw_accel_active_ && frame->format == hw_pix_fmt_) {
+				// Zero-copy path: the renderer shares this decoder's D3D11 device, so
+				// it can build a shader-resource view directly against this frame's
+				// GPU surface (frame->data[0] = array texture, data[1] = slice index)
+				// without any CPU involvement. We just keep the AVFrame reference alive
+				// in the queue - av_frame_ref bumps the underlying AVBufferRef refcount,
+				// so the GPU surface stays valid until the renderer is done with it and
+				// the YUVFrame is destroyed.
+				YUVFrame yf;
+				yf.frame.reset(av_frame_alloc());
+				av_frame_ref(yf.frame.get(), frame);
+				yf.width = codec_ctx_->width;
+				yf.height = codec_ctx_->height;
+				yf.is_raw_hw_frame = true;
+				int64_t pts_raw = frame->pts;
+				if (pts_raw == AV_NOPTS_VALUE) pts_raw = frame->best_effort_timestamp;
+				yf.pts_seconds = (pts_raw != AV_NOPTS_VALUE) ? pts_raw * time_base_ : 0.0;
+
+				if (!queue_.push(std::move(yf), cancelled_)) break;
+				frame_count++;
+				if (frame_count % 100 == 0) {
+					LOG_INFO("Decoded " << frame_count << " frames (zero-copy)");
+				}
+				continue;
 			}
 
 			// Hardware-decoded frames live in GPU memory (a D3D11 surface handle) and
@@ -580,6 +711,7 @@ private:
 	double time_base_ = 0.0;
 	bool   needs_conversion_ = false;
 	bool   hw_accel_active_ = false;
+	bool   zero_copy_capable_ = false;
 	AVPixelFormat sws_src_fmt_ = AV_PIX_FMT_NONE;
 	int    sws_src_w_ = 0;
 	int    sws_src_h_ = 0;
@@ -600,6 +732,22 @@ private:
 
 namespace wallpaper {
 	struct ScreenSize { int w, h; };
+
+	// Drains the Win32 message queue for the calling thread's windows (the
+	// wallpaper child window). Shared by both render paths - the zero-copy path
+	// has no SDL event loop to fall back on, so this is its only pump.
+	inline void pump_win32_events(std::atomic<bool>& cancelled) {
+		MSG msg;
+		while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+			if (msg.message == WM_QUIT) {
+				LOG_INFO("WM_QUIT received, cancelling");
+				cancelled = true;
+				return;
+			}
+			TranslateMessage(&msg);
+			DispatchMessageA(&msg);
+		}
+	}
 
 	inline ScreenSize physical_screen_size() {
 		DEVMODEA dm{};
@@ -1096,16 +1244,8 @@ private:
 	}
 
 	static void pump_events(std::atomic<bool>& cancelled) {
-		MSG msg;
-		while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
-			if (msg.message == WM_QUIT) {
-				LOG_INFO("WM_QUIT received, cancelling");
-				cancelled = true;
-				return;
-			}
-			TranslateMessage(&msg);
-			DispatchMessageA(&msg);
-		}
+		wallpaper::pump_win32_events(cancelled);
+		if (cancelled) return;
 		SDL_Event ev;
 		while (SDL_PollEvent(&ev)) {
 			if (ev.type == SDL_EVENT_QUIT) {

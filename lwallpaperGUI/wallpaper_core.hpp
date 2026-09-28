@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <shellscalingapi.h>
+#include <dwmapi.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
@@ -43,11 +44,12 @@ extern "C" {
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shcore.lib")
+#pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 
-#define DEBUG_ENABLED 0
+#define DEBUG_ENABLED 1
 #if DEBUG_ENABLED
 #include <rang.hpp>
 #define LOG_INFO_ENABLED 1
@@ -652,6 +654,112 @@ namespace wallpaper {
 		}
 	}
 
+	// Decides whether the wallpaper can currently be seen by the user.
+	// Call visible() once per loop iteration; the expensive Win32 checks are
+	// throttled internally. Must be used from a single thread.
+	class VisibilityGate {
+	public:
+		explicit VisibilityGate(HWND wallpaper_child, int check_interval_ms = 200)
+			: self_(wallpaper_child), interval_ms_(check_interval_ms) {
+		}
+
+		bool visible() {
+			ULONGLONG now = GetTickCount64();
+			if (checked_ && now - last_check_ < static_cast<ULONGLONG>(interval_ms_)) {
+				return cached_;
+			}
+			checked_ = true;
+			last_check_ = now;
+			cached_ = !session_inactive() && !desktop_covered();
+			return cached_;
+		}
+
+	private:
+		// Locked / disconnected session: the input desktop is not "Default".
+		static bool session_inactive() {
+			HDESK d = OpenInputDesktop(0, FALSE, DESKTOP_SWITCHDESKTOP);
+			if (!d) return true; // secure desktop (lock screen, UAC) => not ours
+			CloseDesktop(d);
+			return false;
+		}
+
+		static bool is_cloaked(HWND w) {
+			DWORD cloaked = 0;
+			constexpr DWORD kDwmwaCloaked = 14;
+			HRESULT hr = DwmGetWindowAttribute(w, kDwmwaCloaked, &cloaked, sizeof(cloaked));
+			return SUCCEEDED(hr) && cloaked != 0;
+		}
+
+		bool is_shell_window(HWND w) const {
+			char cls[64]{};
+			GetClassNameA(w, cls, sizeof(cls));
+			return strcmp(cls, "Progman") == 0 || strcmp(cls, "WorkerW") == 0 ||
+				strcmp(cls, "Shell_TrayWnd") == 0 || strcmp(cls, "Shell_SecondaryTrayWnd") == 0 ||
+				strcmp(cls, "SHELLDLL_DefView") == 0;
+		}
+
+		// True when some other window fully covers the monitor's work area.
+		bool desktop_covered() const {
+			HWND fg = GetForegroundWindow();
+			if (!fg || fg == self_ || is_shell_window(fg)) return false;
+			if (!IsWindowVisible(fg) || IsIconic(fg) || is_cloaked(fg)) return false;
+
+			RECT wr{};
+			if (!GetWindowRect(fg, &wr)) return false;
+
+			// Compare against the monitor our wallpaper lives on.
+			HMONITOR mon = MonitorFromWindow(self_, MONITOR_DEFAULTTOPRIMARY);
+			MONITORINFO mi{};
+			mi.cbSize = sizeof(mi);
+			if (!GetMonitorInfoA(mon, &mi)) return false;
+
+			// Tolerance for the invisible resize borders of maximized windows.
+			constexpr LONG kTol = 8;
+			const RECT& w = mi.rcWork;
+			return wr.left <= w.left + kTol && wr.top <= w.top + kTol &&
+				wr.right >= w.right - kTol && wr.bottom >= w.bottom - kTol;
+		}
+
+		HWND self_;
+		int interval_ms_;
+		ULONGLONG last_check_ = 0;
+		bool checked_ = false;
+		bool cached_ = true;
+	};
+
+	// Shared pause/resume clock. Keeps the "frame N shows at pts N" mapping
+	// intact across pauses without trying to catch up on the skipped time.
+	struct PlaybackClock {
+		double perf_freq = static_cast<double>(SDL_GetPerformanceFrequency());
+		double pts_origin = -1.0;
+		double wall_origin = 0.0;
+		double last_pts = 0.0;
+		bool   need_sync = true;
+
+		double now() const { return static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq; }
+
+		// Call for every popped frame; handles first frame, loop wrap, resume.
+		void on_frame(double pts) {
+			if (!need_sync && pts < last_pts - 0.5) need_sync = true; // video looped
+			last_pts = pts;
+			if (need_sync) {
+				pts_origin = pts;
+				wall_origin = now();
+				need_sync = false;
+			}
+		}
+
+		void resync() { need_sync = true; }
+
+		// Sleep/spin until the frame's presentation time.
+		void wait_for(double pts) const {
+			double frame_time = pts - pts_origin;
+			double wait_sec = frame_time - (now() - wall_origin);
+			if (wait_sec > 0.002) SDL_Delay(static_cast<Uint32>((wait_sec - 0.002) * 1000.0));
+			while ((now() - wall_origin) < frame_time) std::this_thread::yield();
+		}
+	};
+
 	inline ScreenSize physical_screen_size() {
 		DEVMODEA dm{};
 		dm.dmSize = sizeof(dm);
@@ -964,7 +1072,7 @@ namespace sdl {
 
 class Renderer {
 public:
-	Renderer(HWND hwnd, int w, int h) {
+	Renderer(HWND hwnd, int w, int h) : hwnd_(hwnd) {
 		LOG_INFO("Creating SDL renderer for HWND=" << hwnd << " size=" << w << "x" << h);
 		SDL_PropertiesID props = SDL_CreateProperties();
 		SDL_SetPointerProperty(props, SDL_PROP_WINDOW_CREATE_WIN32_HWND_POINTER, hwnd);
@@ -993,15 +1101,27 @@ public:
 		sdl::TexturePtr texture;
 		bool texture_is_nv12 = false;
 
-		double perf_freq = static_cast<double>(SDL_GetPerformanceFrequency());
-		double pts_origin = -1.0;
-		double wall_origin = 0.0;
-		double last_pts = 0.0;
-		bool   first_frame = true;
-		int    frame_count = 0;
+		wallpaper::VisibilityGate gate(hwnd_);
+		wallpaper::PlaybackClock clock;
+		bool paused = false;
+		int  frame_count = 0;
 
 		while (!cancelled) {
 			pump_events(cancelled);
+			if (cancelled) break;
+
+			// Wallpaper not visible: don't pop, decode or present anything.
+			// The bounded FrameQueue then blocks the decoder thread as well.
+			if (!gate.visible()) {
+				if (!paused) { paused = true; LOG_INFO("Wallpaper hidden: rendering paused"); }
+				SDL_Delay(100);
+				continue;
+			}
+			if (paused) {
+				paused = false;
+				clock.resync(); // don't try to catch up on the time spent hidden
+				LOG_INFO("Wallpaper visible: rendering resumed");
+			}
 
 			YUVFrame frame;
 			if (!queue.pop(frame, cancelled, decoder_done)) {
@@ -1009,40 +1129,14 @@ public:
 				break;
 			}
 
-			if (!first_frame && frame.pts_seconds < last_pts - 0.5) {
-				pts_origin = frame.pts_seconds;
-				wall_origin = static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq;
-			}
-			last_pts = frame.pts_seconds;
-
-			if (first_frame || frame.is_nv12 != texture_is_nv12) {
+			if (!texture || frame.is_nv12 != texture_is_nv12) {
 				bool requested_nv12 = frame.is_nv12;
 				texture = create_texture(frame.width, frame.height, requested_nv12, nv12_ok);
 				texture_is_nv12 = requested_nv12 && (!nv12_ok || nv12_ok->load());
 			}
 
-			if (first_frame) {
-				pts_origin = frame.pts_seconds;
-				wall_origin = static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq;
-				first_frame = false;
-			}
-
-			double elapsed = static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq - wall_origin;
-			double frame_time = frame.pts_seconds - pts_origin;
-			double wait_sec = frame_time - elapsed;
-
-			if (wait_sec > 0.002) {
-				SDL_Delay(static_cast<Uint32>((wait_sec - 0.002) * 1000.0));
-			}
-			else if (wait_sec < -0.01) {
-				if (frame_time > 0.1) {
-					LOG_WARN("Frame late by " << -wait_sec << " sec");
-				}
-			}
-
-			while ((static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq - wall_origin) < frame_time) {
-				std::this_thread::yield();
-			}
+			clock.on_frame(frame.pts_seconds);
+			clock.wait_for(frame.pts_seconds);
 
 			upload_and_present(texture.get(), frame, texture_is_nv12);
 			frame_count++;
@@ -1131,6 +1225,7 @@ private:
 		}
 	}
 
+	HWND             hwnd_ = nullptr;
 	sdl::WindowPtr   window_;
 	sdl::RendererPtr renderer_;
 };

@@ -63,7 +63,7 @@ public slots:
 			if (zero_copy_ready && decoder.is_zero_copy_active()) {
 				LOG_INFO("Using zero-copy D3D11 render path");
 				zero_copy.set_sync_callbacks(decoder.hw_lock, decoder.hw_unlock, decoder.hw_lock_ctx);
-				run_zero_copy_loop(zero_copy, queue, decoder.done_flag());
+				run_zero_copy_loop(zero_copy, queue, decoder.done_flag(), child_hwnd);
 			}
 			else {
 				Renderer renderer(child_hwnd, m_w, m_h);
@@ -96,43 +96,35 @@ signals:
 
 private:
 	void run_zero_copy_loop(wallpaper::D3D11ZeroCopyRenderer& zero_copy,
-		FrameQueue& queue, std::atomic<bool>& decoder_done) {
-		double perf_freq = static_cast<double>(SDL_GetPerformanceFrequency());
-		double pts_origin = -1.0;
-		double wall_origin = 0.0;
-		double last_pts = 0.0;
-		bool   first_frame = true;
-		int    frame_count = 0;
+		FrameQueue& queue, std::atomic<bool>& decoder_done, HWND child_hwnd) {
+		wallpaper::VisibilityGate gate(child_hwnd);
+		wallpaper::PlaybackClock clock;
+		bool paused = false;
+		int  frame_count = 0;
 
 		while (!m_cancelled) {
 			wallpaper::pump_win32_events(m_cancelled);
 			if (m_cancelled) break;
 
+			// Wallpaper not visible: don't pop, copy or Present anything.
+			// The bounded FrameQueue then blocks the decoder thread as well
+			// (extra_hw_frames leaves enough headroom in the decoder surface pool).
+			if (!gate.visible()) {
+				if (!paused) { paused = true; LOG_INFO("Wallpaper hidden: rendering paused"); }
+				SDL_Delay(100);
+				continue;
+			}
+			if (paused) {
+				paused = false;
+				clock.resync(); // don't try to catch up on the time spent hidden
+				LOG_INFO("Wallpaper visible: rendering resumed");
+			}
+
 			YUVFrame frame;
 			if (!queue.pop(frame, m_cancelled, decoder_done)) break;
 
-			if (!first_frame && frame.pts_seconds < last_pts - 0.5) {
-				pts_origin = frame.pts_seconds;
-				wall_origin = static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq;
-			}
-			last_pts = frame.pts_seconds;
-
-			if (first_frame) {
-				pts_origin = frame.pts_seconds;
-				wall_origin = static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq;
-				first_frame = false;
-			}
-
-			double elapsed = static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq - wall_origin;
-			double frame_time = frame.pts_seconds - pts_origin;
-			double wait_sec = frame_time - elapsed;
-
-			if (wait_sec > 0.002) {
-				SDL_Delay(static_cast<Uint32>((wait_sec - 0.002) * 1000.0));
-			}
-			while ((static_cast<double>(SDL_GetPerformanceCounter()) / perf_freq - wall_origin) < frame_time) {
-				std::this_thread::yield();
-			}
+			clock.on_frame(frame.pts_seconds);
+			clock.wait_for(frame.pts_seconds);
 
 			if (!frame.is_raw_hw_frame) {
 				LOG_WARN("run_zero_copy_loop: got a non-raw-hw frame, skipping");

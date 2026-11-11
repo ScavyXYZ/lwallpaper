@@ -125,11 +125,7 @@ float4 PSMain(VSOut input) : SV_TARGET {
 			context_->CopySubresourceRegion(slice_copy_.Get(), 0, 0, 0, 0,
 				array_texture, src_subresource, &src_box);
 
-			ComPtr<ID3D11ShaderResourceView> y_srv, uv_srv;
-			if (!make_plane_srv(slice_copy_.Get(), DXGI_FORMAT_R8_UNORM, y_srv)) return false;
-			if (!make_plane_srv(slice_copy_.Get(), DXGI_FORMAT_R8G8_UNORM, uv_srv)) return false;
-
-			ID3D11ShaderResourceView* srvs[2] = { y_srv.Get(), uv_srv.Get() };
+			ID3D11ShaderResourceView* srvs[2] = { y_srv_.Get(), uv_srv_.Get() };
 			context_->PSSetShaderResources(0, 2, srvs);
 			context_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
 
@@ -164,6 +160,9 @@ float4 PSMain(VSOut input) : SV_TARGET {
 
 		void destroy() {
 			valid_ = false;
+			y_srv_.Reset();
+			uv_srv_.Reset();
+			slice_copy_.Reset();
 			sampler_.Reset();
 			pixel_shader_.Reset();
 			vertex_shader_.Reset();
@@ -327,7 +326,12 @@ float4 PSMain(VSOut input) : SV_TARGET {
 				return false;
 			}
 
+			ComPtr<ID3D11ShaderResourceView> y_srv, uv_srv;
+			if (!make_plane_srv(tex.Get(), DXGI_FORMAT_R8_UNORM, y_srv) ||
+				!make_plane_srv(tex.Get(), DXGI_FORMAT_R8G8_UNORM, uv_srv)) return false;
 			slice_copy_ = tex;
+			y_srv_ = y_srv;
+			uv_srv_ = uv_srv;
 			slice_copy_w_ = src_desc.Width;
 			slice_copy_h_ = height;
 			slice_copy_fmt_ = src_desc.Format;
@@ -342,6 +346,7 @@ float4 PSMain(VSOut input) : SV_TARGET {
 		ComPtr<ID3D11PixelShader>    pixel_shader_;
 		ComPtr<ID3D11SamplerState>   sampler_;
 		ComPtr<ID3D11Texture2D>      slice_copy_;
+		ComPtr<ID3D11ShaderResourceView> y_srv_, uv_srv_;
 		UINT       slice_copy_w_ = 0;
 		UINT       slice_copy_h_ = 0;
 		DXGI_FORMAT slice_copy_fmt_ = DXGI_FORMAT_UNKNOWN;

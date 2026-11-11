@@ -52,7 +52,11 @@ extern "C" {
 #define DEBUG_ENABLED 1
 #if DEBUG_ENABLED
 #include <rang.hpp>
+#ifdef NDEBUG
+#define LOG_INFO_ENABLED 0
+#else
 #define LOG_INFO_ENABLED 1
+#endif
 #define LOG_ERROR_ENABLED 1
 #define LOG_WARN_ENABLED 1
 #endif
@@ -343,6 +347,7 @@ private:
 				cfg->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
 
 				AVBufferRef* raw_hw_ctx = nullptr;
+				bool sharing_device = false;
 
 				if (shared_device) {
 					raw_hw_ctx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
@@ -362,6 +367,7 @@ private:
 							raw_hw_ctx = nullptr;
 						}
 						else {
+							sharing_device = true;
 							hw_lock = d3d11_ctx->lock;
 							hw_unlock = d3d11_ctx->unlock;
 							hw_lock_ctx = d3d11_ctx->lock_ctx;
@@ -384,7 +390,7 @@ private:
 				codec_ctx_->opaque = this;
 				codec_ctx_->get_format = &Decoder::get_hw_format;
 				hw_accel_active_ = true;
-				zero_copy_capable_ = (shared_device != nullptr) && (codec_ctx_->hw_device_ctx != nullptr);
+				zero_copy_capable_ = sharing_device && (codec_ctx_->hw_device_ctx != nullptr);
 				LOG_INFO("D3D11VA hardware decode enabled for codec " << codec->name);
 				return;
 			}
@@ -439,6 +445,7 @@ private:
 			}
 			if (ret < 0) {
 				LOG_WARN("av_read_frame error: " << ffmpeg::av_error(ret) << ", skipping");
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 				continue;
 			}
 
@@ -551,7 +558,7 @@ private:
 		int w = transferred->width;
 		int h = transferred->height;
 
-		if (sws_ctx_ && fmt == sws_src_fmt_ && w == sws_src_w_ && h == sws_src_h_) return;
+		if (fmt == sws_src_fmt_ && w == sws_src_w_ && h == sws_src_h_) return;
 
 		LOG_INFO("HW frame format: " << av_get_pix_fmt_name(fmt) << ", size=" << w << "x" << h);
 
@@ -751,12 +758,13 @@ namespace wallpaper {
 
 		void resync() { need_sync = true; }
 
-		// Sleep/spin until the frame's presentation time.
+		// Sleep until the frame's presentation time without busy-waiting.
 		void wait_for(double pts) const {
 			double frame_time = pts - pts_origin;
-			double wait_sec = frame_time - (now() - wall_origin);
-			if (wait_sec > 0.002) SDL_Delay(static_cast<Uint32>((wait_sec - 0.002) * 1000.0));
-			while ((now() - wall_origin) < frame_time) std::this_thread::yield();
+			double wait_sec;
+			while ((wait_sec = frame_time - (now() - wall_origin)) > 0.0) {
+				std::this_thread::sleep_for(std::chrono::duration<double>(wait_sec));
+			}
 		}
 	};
 

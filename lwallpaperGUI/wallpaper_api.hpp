@@ -27,7 +27,6 @@ public slots:
 	void startPlayback() {
 		try {
 			emit statusChanged("Initializing environment...");
-			timeBeginPeriod(1);
 
 			HWND parent = wallpaper::wallpaper_hwnd(m_w, m_h);
 			while (!parent && !m_cancelled.load()) {
@@ -35,7 +34,6 @@ public slots:
 				parent = wallpaper::wallpaper_hwnd(m_w, m_h);
 			}
 			if (!parent) {
-				timeEndPeriod(1);
 				emit finished();
 				return;
 			}
@@ -75,11 +73,9 @@ public slots:
 			decoder.join();
 
 			DestroyWindow(child_hwnd);
-			timeEndPeriod(1);
 			emit statusChanged("Wallpaper stopped.");
 		}
 		catch (const std::exception& ex) {
-			timeEndPeriod(1);
 			emit errorOccurred(QString::fromStdString(ex.what()));
 		}
 		emit finished();

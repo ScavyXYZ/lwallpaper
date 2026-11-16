@@ -1,0 +1,94 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: GUI / ${{ matrix.configuration }}
+    runs-on: windows-2025
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release, Debug]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout GUI and pinned core
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          lfs: true
+          submodules: recursive
+          persist-credentials: false
+      - name: Verify LFS dependencies
+        run: |
+          git lfs fsck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C third_party/lwallpaper_core lfs pull
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C third_party/lwallpaper_core lfs fsck
+      - name: Install Qt
+        id: qt
+        uses: jurplel/install-qt-action@b344308e4483fc892e0d27b3cd1b173ebdd95f06 # v4.5.0
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtsvg
+          cache: true
+      - name: Prepare verified FFmpeg CLI
+        run: >-
+          ./third_party/lwallpaper_core/scripts/ci/prepare-ffmpeg.ps1
+          -Destination "$env:RUNNER_TEMP/ffmpeg"
+      - name: Configure
+        env:
+          QT_ROOT: ${{ steps.qt.outputs.qt-root-dir }}
+        run: >-
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          "-DQt6_ROOT=$env:QT_ROOT" -DBUILD_TESTING=ON
+          -DLWALLPAPER_DEPLOY_RUNTIME=ON
+      - name: Build and deploy runtime
+        run: cmake --build build --config "${{ matrix.configuration }}" --parallel 2
+      - name: Test
+        # GPU coverage requires a hardware-equipped machine; never run the
+        # manual desktop-changing selftest on CI.
+        run: >-
+          ctest --test-dir build -C "${{ matrix.configuration }}"
+          --output-on-failure --no-tests=error
+          --output-junit "$env:GITHUB_WORKSPACE/build/test-results.xml"
+          -E "^d3d11_gpu_smoke$"
+      - name: Stage application and matching runtime
+        run: >-
+          ./third_party/lwallpaper_core/scripts/ci/stage-artifacts.ps1
+          -Kind Gui -Configuration "${{ matrix.configuration }}" -Root .
+      - name: Upload application artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gui-windows-x64-${{ matrix.configuration }}
+          path: out/ci-package/${{ matrix.configuration }}/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload test and configuration diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gui-diagnostics-${{ matrix.configuration }}
+          path: |
+            build/test-results.xml
+            build/Testing/Temporary/
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/ui-preview/${{ matrix.configuration }}/
+          if-no-files-found: warn
+          retention-days: 14

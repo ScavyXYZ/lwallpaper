@@ -1,15 +1,10 @@
-.vs/
-Output/
-x64/
-obj/
+/.vs/
+/build/
+/out/
+/third_party/SDL3/lib/x64/*.pdb
+CMakeUserPresets.json
 
-lwallpaperGUI/ffmpeg/doc/
-lwallpaperGUI/ffmpeg/presets/
-lwallpaperGUI/obj/
-lwallpaperGUI/x64/
+third_party/ffmpeg/doc/
+third_party/ffmpeg/presets/
 
-*.vsxproj.filters
-*.vsxproj.user
-*.vcxproj.user
-*.aps
 *.exe

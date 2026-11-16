@@ -56,9 +56,8 @@ jobs:
         env:
           QT_ROOT: ${{ steps.qt.outputs.qt-root-dir }}
         run: >-
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-          "-DQt6_ROOT=$env:QT_ROOT" -DBUILD_TESTING=ON
-          -DLWALLPAPER_DEPLOY_RUNTIME=ON
+          ./third_party/lwallpaper_core/scripts/ci/configure.ps1
+          -Kind Gui -Root . -QtRoot "$env:QT_ROOT"
       - name: Build and deploy runtime
         run: cmake --build build --config "${{ matrix.configuration }}" --parallel 2
       - name: Test
@@ -74,7 +73,7 @@ jobs:
           ./third_party/lwallpaper_core/scripts/ci/stage-artifacts.ps1
           -Kind Gui -Configuration "${{ matrix.configuration }}" -Root .
       - name: Upload application artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: gui-windows-x64-${{ matrix.configuration }}
           path: out/ci-package/${{ matrix.configuration }}/
@@ -82,7 +81,7 @@ jobs:
           retention-days: 14
       - name: Upload test and configuration diagnostics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: gui-diagnostics-${{ matrix.configuration }}
           path: |

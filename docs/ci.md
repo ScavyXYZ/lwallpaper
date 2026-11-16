@@ -1,7 +1,8 @@
 # Continuous integration
 
 GitHub Actions builds the GUI against its pinned `lwallpaper_core` submodule
-on Windows Server 2025 / Visual Studio 2022, in Release and Debug. Qt 6.8.3
+on Windows Server 2025 in Release and Debug. The installed Visual Studio
+2022/2026 toolchain is discovered using `vswhere`. Qt 6.8.3
 MSVC 2022 is installed from the official Qt archives by a SHA-pinned action.
 This is a reproducible CI baseline; local builds may use newer compatible Qt.
 

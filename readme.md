@@ -4,6 +4,19 @@
 
 # LWallpaper
 
+The GUI links the separate, Qt-free
+[`lwallpaper_core`](https://github.com/ScavyXYZ/lwallpaper_core) library, pinned
+as `third_party/lwallpaper_core`. Playback/conversion are not duplicated in the
+GUI. After cloning, run:
+
+```powershell
+git submodule update --init --recursive
+git lfs pull
+git submodule foreach --recursive git lfs pull
+```
+
+The original GUI design is preserved.
+
 ### A lightweight Windows live wallpaper manager written in C++
 
 Turn your favorite videos into beautiful animated desktop wallpapers.

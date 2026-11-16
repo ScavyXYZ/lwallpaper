@@ -2,7 +2,7 @@ add_executable(lwallpaper_performance_tests performance_tests.cpp)
 set_target_properties(lwallpaper_performance_tests PROPERTIES
     AUTOMOC OFF AUTOUIC OFF AUTORCC OFF
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-target_include_directories(lwallpaper_performance_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_include_directories(lwallpaper_performance_tests PRIVATE "${LWALLPAPER_CORE_DIR}/src")
 target_include_directories(lwallpaper_performance_tests SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/rang")
 target_compile_definitions(lwallpaper_performance_tests PRIVATE UNICODE _UNICODE)
 target_compile_options(lwallpaper_performance_tests PRIVATE /W4 /utf-8)
@@ -18,7 +18,7 @@ target_include_directories(lwallpaper_import_worker_tests PRIVATE "${PROJECT_SOU
 target_include_directories(lwallpaper_import_worker_tests SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/rang")
 target_compile_options(lwallpaper_import_worker_tests PRIVATE /W4 /utf-8)
 target_compile_definitions(lwallpaper_import_worker_tests PRIVATE UNICODE _UNICODE)
-target_link_libraries(lwallpaper_import_worker_tests PRIVATE Qt6::Core lwallpaper_dependencies
+target_link_libraries(lwallpaper_import_worker_tests PRIVATE Qt6::Core livewallpaper::livewallpaper lwallpaper_dependencies
     d3d11 dxgi d3dcompiler dwmapi shcore winmm)
 add_dependencies(lwallpaper_import_worker_tests lwallpaper)
 

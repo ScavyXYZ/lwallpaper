@@ -36,7 +36,6 @@ int main(int argc, char** argv) {
     app.setApplicationName("ImportShutdown-" + QString::number(QCoreApplication::applicationPid()));
     const QString config = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
     struct Cleanup { QString path; ~Cleanup() { QDir(path).removeRecursively(); } } cleanup{config};
-    av_log_set_level(AV_LOG_ERROR);
     try {
         check(argc == 3, "Expected fixture and scratch directory");
         QTemporaryDir directory(QString::fromUtf8(argv[2]) + "/worker-XXXXXX");

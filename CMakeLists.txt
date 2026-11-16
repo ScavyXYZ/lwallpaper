@@ -14,6 +14,12 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets)
 include(cmake/Dependencies.cmake)
+set(LWALLPAPER_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lwallpaper_core")
+if(NOT EXISTS "${LWALLPAPER_CORE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "Initialize the core submodule: git submodule update --init --recursive")
+endif()
+set(LIVEWALLPAPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory("${LWALLPAPER_CORE_DIR}" core)
 
 add_executable(lwallpaper WIN32
     src/app/main.cpp
@@ -21,8 +27,6 @@ add_executable(lwallpaper WIN32
     src/gui/lwallpaperGUI.h
     src/gui/lwallpaperGUI.ui
     src/wallpaper/wallpaper_api.hpp
-    src/wallpaper/wallpaper_core.hpp
-    src/render/d3d11_zero_copy.hpp
     resources/lwallpaperGUI.qrc
     resources/lwallpaper.rc)
 
@@ -32,7 +36,7 @@ target_compile_options(lwallpaper PRIVATE /W3 /utf-8 /permissive-)
 target_compile_definitions(lwallpaper PRIVATE UNICODE _UNICODE QT_NO_DEPRECATED_WARNINGS)
 option(LWALLPAPER_ENABLE_LOGGING "Enable playback diagnostics" OFF)
 target_compile_definitions(lwallpaper PRIVATE DEBUG_ENABLED=$<BOOL:${LWALLPAPER_ENABLE_LOGGING}>)
-target_link_libraries(lwallpaper PRIVATE Qt6::Widgets lwallpaper_dependencies
+target_link_libraries(lwallpaper PRIVATE Qt6::Widgets livewallpaper::livewallpaper lwallpaper_dependencies
     d3d11 dxgi d3dcompiler dwmapi shcore winmm)
 set_target_properties(lwallpaper PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

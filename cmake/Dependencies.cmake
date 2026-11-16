@@ -10,7 +10,7 @@ endforeach()
 
 add_library(lwallpaper_dependencies INTERFACE)
 target_include_directories(lwallpaper_dependencies SYSTEM INTERFACE
-    "${FFMPEG_ROOT}/include" "${SDL3_ROOT}/include")
+    "$<BUILD_INTERFACE:${FFMPEG_ROOT}/include>" "$<BUILD_INTERFACE:${SDL3_ROOT}/include>")
 
 set(LWALLPAPER_RUNTIME_DLLS "")
 foreach(_component IN ITEMS avcodec avdevice avfilter avformat avutil swresample swscale)

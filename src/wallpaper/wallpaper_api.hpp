@@ -1,5 +1,4 @@
 #pragma once
-
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -8,382 +7,199 @@
 #include <QDir>
 #include <QFile>
 #include <QTextStream>
-#include <atomic>
-#include <string>
 #include <QPointer>
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <QFileInfo>
+#include <atomic>
+#include <livewallpaper/livewallpaper.hpp>
 
-#include "wallpaper_core.hpp"
-#include "window_handle.hpp"
-#include "render/d3d11_zero_copy.hpp"
-
+// Qt owns collection management and worker lifetimes. Playback and video
+// conversion are implemented only by the pinned livewallpaper core library.
 class WallpaperWorker : public QObject {
-	Q_OBJECT
+    Q_OBJECT
 public:
-	WallpaperWorker(const QString& videoPath, int w, int h)
-		: m_videoPath(videoPath), m_w(w), m_h(h), m_cancelled(false) {
-	}
-
+    WallpaperWorker(const QString& path, int, int) : m_path(path) {}
 public slots:
-	void startPlayback() {
-		try {
-			emit statusChanged("Initializing environment...");
-
-			HWND parent = wallpaper::wallpaper_hwnd(m_w, m_h);
-			while (!parent && !m_cancelled.load()) {
-				QThread::msleep(15);
-				parent = wallpaper::wallpaper_hwnd(m_w, m_h);
-			}
-			if (!parent) {
-				emit finished();
-				return;
-			}
-
-			HINSTANCE inst = GetModuleHandle(nullptr);
-			wallpaper::WindowHandle child(wallpaper::create_wallpaper_child(inst, parent, m_w, m_h));
-			HWND child_hwnd = child.get();
-
-			FrameQueue queue(kFrameQueueCapacity);
-
-			wallpaper::D3D11ZeroCopyRenderer zero_copy;
-			bool zero_copy_ready = zero_copy.initialize(child_hwnd, m_w, m_h);
-			if (!zero_copy_ready) {
-				LOG_WARN("Zero-copy D3D11 renderer unavailable (" << zero_copy.last_error()
-					<< "), falling back to SDL render path");
-			}
-
-			Decoder decoder(m_videoPath.toStdString(), queue, m_cancelled);
-			if (zero_copy_ready) {
-				decoder.external_d3d_device = zero_copy.device();
-			}
-			decoder.start();
-
-			emit statusChanged("Wallpaper started.");
-
-			if (zero_copy_ready && decoder.is_zero_copy_active()) {
-				LOG_INFO("Using zero-copy D3D11 render path");
-				zero_copy.set_sync_callbacks(decoder.hw_lock, decoder.hw_unlock, decoder.hw_lock_ctx);
-				run_zero_copy_loop(zero_copy, queue, decoder.done_flag(), child_hwnd);
-			}
-			else {
-				Renderer renderer(child_hwnd, m_w, m_h);
-				renderer.run(queue, m_cancelled, decoder.done_flag(), &decoder.nv12_passthrough_ok);
-			}
-
-			m_cancelled = true;
-			queue.cancel();
-			decoder.join();
-			decoder.rethrow_error();
-
-			emit statusChanged("Wallpaper stopped.");
-		}
-		catch (const std::exception& ex) {
-			emit errorOccurred(QString::fromStdString(ex.what()));
-		}
-		emit finished();
-	}
-
-	void stopPlayback() {
-		m_cancelled = true;
-	}
-
+    void startPlayback() {
+        emit statusChanged("Initializing environment...");
+        livewallpaper::Wallpaper player([](livewallpaper::LogLevel, std::string_view) {});
+        const std::string error = player.play(m_path.toUtf8().toStdString());
+        if (!error.empty()) {
+            emit errorOccurred(QString::fromStdString(error));
+        } else {
+            emit statusChanged("Wallpaper started.");
+            while (!m_cancelled && player.isPlaying()) QThread::msleep(20);
+            player.stop();
+            if (!m_cancelled && !player.lastError().empty())
+                emit errorOccurred(QString::fromStdString(player.lastError()));
+            emit statusChanged("Wallpaper stopped.");
+        }
+        emit finished();
+    }
+    void stopPlayback() { m_cancelled = true; }
 signals:
-	void finished();
-	void errorOccurred(const QString& message);
-	void statusChanged(const QString& status);
-
+    void finished();
+    void errorOccurred(const QString& message);
+    void statusChanged(const QString& status);
 private:
-	void run_zero_copy_loop(wallpaper::D3D11ZeroCopyRenderer& zero_copy,
-		FrameQueue& queue, std::atomic<bool>& decoder_done, HWND child_hwnd) {
-		wallpaper::VisibilityGate gate(child_hwnd);
-		wallpaper::PlaybackClock clock;
-		bool paused = false;
-		int  frame_count = 0;
-
-		while (!m_cancelled) {
-			wallpaper::pump_win32_events(m_cancelled);
-			if (m_cancelled) break;
-
-			// Wallpaper not visible: don't pop, copy or Present anything.
-			// The bounded FrameQueue then blocks the decoder thread as well
-			// (extra_hw_frames leaves enough headroom in the decoder surface pool).
-			if (!gate.visible()) {
-				if (!paused) { paused = true; LOG_INFO("Wallpaper hidden: rendering paused"); }
-				SDL_Delay(100);
-				continue;
-			}
-			if (paused) {
-				paused = false;
-				clock.resync(); // don't try to catch up on the time spent hidden
-				LOG_INFO("Wallpaper visible: rendering resumed");
-			}
-
-			YUVFrame frame;
-			if (!queue.pop(frame, m_cancelled, decoder_done)) break;
-
-			clock.on_frame(frame.pts_seconds);
-			if (clock.should_drop(frame.pts_seconds)) continue;
-			if (!clock.wait_for(frame.pts_seconds, m_cancelled)) break;
-
-			if (!frame.is_raw_hw_frame) {
-				LOG_WARN("run_zero_copy_loop: got a non-raw-hw frame, skipping");
-				continue;
-			}
-
-			if (!zero_copy.present_frame(frame.frame.get())) {
-				if (!zero_copy.is_valid()) {
-					LOG_ERROR("Zero-copy renderer lost (" << zero_copy.last_error() << "), stopping playback");
-					break;
-				}
-				if (present_fail_count_ < 5) {
-					LOG_WARN("present_frame failed (" << zero_copy.last_error() << ")");
-				}
-				present_fail_count_++;
-			}
-			frame_count++;
-			if (frame_count % 100 == 0) {
-				LOG_INFO("Zero-copy: presented " << frame_count << " frames, " << present_fail_count_ << " failures so far");
-			}
-		}
-		LOG_INFO("Zero-copy render loop finished, total frames presented: " << frame_count);
-	}
-
-	QString m_videoPath;
-	int m_w, m_h;
-	std::atomic<bool> m_cancelled;
-	int present_fail_count_ = 0;
+    QString m_path;
+    std::atomic<bool> m_cancelled{false};
 };
 
 class TranscodeWorker : public QObject {
-	Q_OBJECT
+    Q_OBJECT
 public:
-	TranscodeWorker(const QString& input, const QString& output)
-		: m_input(input), m_output(output), m_cancelled(false) {
-	}
-
+    TranscodeWorker(const QString& input, const QString& output) : m_input(input), m_output(output) {}
 public slots:
-	void doWork() {
-		try {
-			// Publish only complete imports; never remove an existing library file
-			// if copying, encoding or cancellation fails.
-			QTemporaryFile temporary(QFileInfo(m_output).absolutePath() + "/.import-XXXXXX.mp4");
-			if (!temporary.open()) throw std::runtime_error("Cannot create temporary import file");
-			QString temporaryPath = temporary.fileName();
-			temporary.close();
-			wallpaper::transcode_video_to_screen(m_input.toStdString(), temporaryPath.toStdString(), m_cancelled);
-
-			if (m_cancelled.load()) {
-				emit finished(false, "Processing cancelled by the user.");
-			}
-			else {
-				if (!temporary.rename(m_output))
-					throw std::runtime_error("Cannot commit imported video (destination may already exist)");
-				temporary.setAutoRemove(false);
-				emit finished(true, "");
-			}
-		}
-		catch (const std::exception& ex) {
-			emit finished(false, m_cancelled.load()
-				? "Processing cancelled by the user." : QString::fromStdString(ex.what()));
-		}
-	}
-
-	void cancel() {
-		m_cancelled.store(true);
-	}
-
+    void doWork() {
+        QTemporaryFile temporary(QFileInfo(m_output).absolutePath() + "/.import-XXXXXX.mp4");
+        if (!temporary.open()) { emit finished(false, "Cannot create temporary import file"); return; }
+        const QString path = temporary.fileName();
+        temporary.close();
+        const auto error = livewallpaper::transcodeToScreenResolution(
+            m_input.toUtf8().toStdString(), path.toUtf8().toStdString(), m_cancelled);
+        if (m_cancelled) {
+            emit finished(false, "Processing cancelled by the user.");
+        } else if (!error.empty()) {
+            emit finished(false, QString::fromStdString(error));
+        } else if (!temporary.rename(m_output)) {
+            emit finished(false, "Cannot commit imported video (destination may already exist)");
+        } else {
+            temporary.setAutoRemove(false);
+            emit finished(true, "");
+        }
+    }
+    void cancel() { m_cancelled = true; }
 signals:
-	void finished(bool success, const QString& errorMsg);
-
+    void finished(bool success, const QString& errorMsg);
 private:
-	QString m_input;
-	QString m_output;
-	std::atomic<bool> m_cancelled;
+    QString m_input, m_output;
+    std::atomic<bool> m_cancelled{false};
 };
 
 class WallpaperAPI : public QObject {
-	Q_OBJECT
+    Q_OBJECT
 public:
-	explicit WallpaperAPI(QObject* parent = nullptr)
-		: QObject(parent), m_thread(nullptr), m_worker(nullptr) {
-		loadIndex();
-	}
+    explicit WallpaperAPI(QObject* parent = nullptr) : QObject(parent) { loadIndex(); }
+    ~WallpaperAPI() {
+        cancelTranscode();
+        stop();
+        for (auto* thread : findChildren<QThread*>(QString(), Qt::FindDirectChildrenOnly)) {
+            thread->quit();
+            thread->wait();
+        }
+    }
+    bool isPlaying() const { return m_thread && m_thread->isRunning(); }
+    QStringList getAvailableWallpapers() const { return m_wallpapers.values(); }
 
-	~WallpaperAPI() {
-		cancelTranscode();
-		stop();
-		// Import workers run blocking codec work. Request cancellation before
-		// destroying their QThreads, including when the user exits mid-import.
-		for (QThread* thread : findChildren<QThread*>(QString(), Qt::FindDirectChildrenOnly)) {
-			thread->quit();
-			thread->wait();
-		}
-	}
+    bool run(const QString& filename) {
+        stop();
+        const QString path = getAppDataPath() + "/wallpapers/" + filename;
+        if (!QFile::exists(path)) { emit errorOccurred("File not found: " + filename); return false; }
+        m_thread = new QThread(this);
+        m_worker = new WallpaperWorker(path, 0, 0);
+        m_worker->moveToThread(m_thread);
+        connect(m_thread, &QThread::started, m_worker, &WallpaperWorker::startPlayback);
+        connect(m_worker, &WallpaperWorker::statusChanged, this, &WallpaperAPI::statusChanged);
+        connect(m_worker, &WallpaperWorker::errorOccurred, this, &WallpaperAPI::errorOccurred);
+        connect(m_worker, &WallpaperWorker::finished, m_thread, &QThread::quit, Qt::DirectConnection);
+        connect(m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
+        connect(m_thread, &QThread::finished, m_thread, &QObject::deleteLater);
+        connect(m_thread, &QThread::destroyed, this, &WallpaperAPI::playbackStopped);
+        m_activeFilename = filename;
+        m_thread->start();
+        return true;
+    }
+    void stop() {
+        if (m_worker) m_worker->stopPlayback();
+        if (m_thread) { m_thread->quit(); m_thread->wait(); }
+        m_worker = nullptr;
+        m_thread = nullptr;
+        m_activeFilename.clear();
+    }
+    bool isActive(const QString& filename) const { return isPlaying() && m_activeFilename == filename; }
 
-	bool isPlaying() const { return m_thread && m_thread->isRunning(); }
+    void add(const QString& inputPath, const QString& targetFilename) {
+        if (!QFile::exists(inputPath)) {
+            emit errorOccurred("File does not exist.");
+            emit transcodeFinished(false, targetFilename, "File does not exist.");
+            return;
+        }
+        QDir dir(getAppDataPath() + "/wallpapers");
+        if (!dir.exists()) dir.mkpath(".");
+        if (m_wallpapers.contains(targetFilename)) {
+            emit statusChanged("Video already exists in the list.");
+            emit transcodeFinished(true, targetFilename, "");
+            return;
+        }
+        auto* thread = new QThread(this);
+        auto* worker = new TranscodeWorker(inputPath, dir.absoluteFilePath(targetFilename));
+        worker->moveToThread(thread);
+        connect(this, &WallpaperAPI::cancelTranscodeSignal, worker, &TranscodeWorker::cancel, Qt::DirectConnection);
+        connect(thread, &QThread::started, worker, &TranscodeWorker::doWork);
+        connect(worker, &TranscodeWorker::finished, this,
+            [this, targetFilename](bool success, const QString& error) {
+                if (success) {
+                    m_wallpapers.insert(targetFilename);
+                    saveIndex();
+                    emit wallpaperAdded(targetFilename);
+                }
+                emit transcodeFinished(success, targetFilename, error);
+            });
+        connect(worker, &TranscodeWorker::finished, thread, &QThread::quit, Qt::DirectConnection);
+        connect(thread, &QThread::finished, worker, &QObject::deleteLater);
+        connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
+    }
 
-	QStringList getAvailableWallpapers() const { return m_wallpapers.values(); }
-
-	bool run(const QString& filename) {
-		stop();
-
-		QString videoPath = getAppDataPath() + "/wallpapers/" + filename;
-		if (!QFile::exists(videoPath)) {
-			emit errorOccurred("File not found: " + filename);
-			return false;
-		}
-
-		auto [sw, sh] = wallpaper::physical_screen_size();
-
-		m_thread = new QThread(this);
-		m_worker = new WallpaperWorker(videoPath, sw, sh);
-		m_worker->moveToThread(m_thread);
-
-		connect(m_thread, &QThread::started, m_worker, &WallpaperWorker::startPlayback);
-		connect(m_worker, &WallpaperWorker::statusChanged, this, &WallpaperAPI::statusChanged);
-		connect(m_worker, &WallpaperWorker::errorOccurred, this, &WallpaperAPI::errorOccurred);
-
-		connect(m_worker, &WallpaperWorker::finished, m_thread, &QThread::quit, Qt::DirectConnection);
-		connect(m_worker, &WallpaperWorker::finished, m_worker, &WallpaperWorker::deleteLater);
-		connect(m_thread, &QThread::finished, m_thread, &QThread::deleteLater);
-		connect(m_thread, &QThread::destroyed, this, &WallpaperAPI::playbackStopped);
-		m_thread->start();
-		m_activeFilename = filename;
-		return true;
-	}
-
-	void stop() {
-		if (m_worker) {
-			m_worker->stopPlayback();
-		}
-		if (m_thread) {
-			m_thread->quit();
-			m_thread->wait();
-		}
-		m_worker = nullptr;
-		m_thread = nullptr;
-		m_activeFilename.clear();
-	}
-
-	bool isActive(const QString& filename) const {
-		return m_thread != nullptr && m_activeFilename == filename;
-	}
-
-	void add(const QString& inputPath, const QString& targetFilename) {
-		if (!QFile::exists(inputPath)) {
-			emit errorOccurred("File does not exist.");
-			emit transcodeFinished(false, targetFilename, "File does not exist.");
-			return;
-		}
-
-		QDir dir(getAppDataPath() + "/wallpapers");
-		if (!dir.exists()) dir.mkpath(".");
-		QString outputPath = dir.absoluteFilePath(targetFilename);
-
-		if (m_wallpapers.contains(targetFilename)) {
-			emit statusChanged("Video already exists in the list.");
-			emit transcodeFinished(true, targetFilename, "");
-			return;
-		}
-
-		QThread* tThread = new QThread(this);
-		TranscodeWorker* tWorker = new TranscodeWorker(inputPath, outputPath);
-		tWorker->moveToThread(tThread);
-
-		connect(this, &WallpaperAPI::cancelTranscodeSignal, tWorker, &TranscodeWorker::cancel, Qt::DirectConnection);
-		connect(tThread, &QThread::started, tWorker, &TranscodeWorker::doWork);
-
-		connect(tWorker, &TranscodeWorker::finished, this, [this, tThread, targetFilename](bool success, const QString& errorMsg) {
-			if (success) {
-				m_wallpapers.insert(targetFilename);
-				saveIndex();
-				emit wallpaperAdded(targetFilename);
-				emit transcodeFinished(true, targetFilename, "");
-			}
-			else {
-				emit transcodeFinished(false, targetFilename, errorMsg);
-			}
-			tThread->quit();
-			});
-
-		connect(tWorker, &TranscodeWorker::finished, tThread, &QThread::quit, Qt::DirectConnection);
-		connect(tThread, &QThread::finished, tWorker, &TranscodeWorker::deleteLater);
-		connect(tThread, &QThread::finished, tThread, &QThread::deleteLater);
-
-		tThread->start();
-	}
-	bool remove(const QString& filename) {
-		if (!m_wallpapers.contains(filename)) {
-			return false;
-		}
-
-		if (isActive(filename)) {
-			emit errorOccurred("Stop the wallpaper before deleting the video that's currently playing.");
-			return false;
-		}
-
-		QString videoPath = getAppDataPath() + "/wallpapers/" + filename;
-		if (QFile::exists(videoPath)) {
-			if (!QFile::remove(videoPath)) {
-				emit errorOccurred("Failed to delete the video file from disk.");
-				return false;
-			}
-		}
-
-		m_wallpapers.remove(filename);
-
-		saveIndex();
-
-		emit statusChanged("Wallpaper deleted successfully.");
-		return true;
-	}
-
-	void cancelTranscode() {
-		emit cancelTranscodeSignal();
-	}
-
+    bool remove(const QString& filename) {
+        if (!m_wallpapers.contains(filename)) return false;
+        if (isActive(filename)) {
+            emit errorOccurred("Stop the wallpaper before deleting the video that's currently playing.");
+            return false;
+        }
+        const QString path = getAppDataPath() + "/wallpapers/" + filename;
+        if (QFile::exists(path) && !QFile::remove(path)) {
+            emit errorOccurred("Failed to delete the video file from disk.");
+            return false;
+        }
+        m_wallpapers.remove(filename);
+        saveIndex();
+        emit statusChanged("Wallpaper deleted successfully.");
+        return true;
+    }
+    void cancelTranscode() { emit cancelTranscodeSignal(); }
 signals:
-	void errorOccurred(const QString& message);
-	void statusChanged(const QString& status);
-	void wallpaperAdded(const QString& filename);
-	void transcodeFinished(bool success, const QString& filename, const QString& errorMsg);
-	void cancelTranscodeSignal();
-	void playbackStopped();
-
+    void errorOccurred(const QString& message);
+    void statusChanged(const QString& status);
+    void wallpaperAdded(const QString& filename);
+    void transcodeFinished(bool success, const QString& filename, const QString& errorMsg);
+    void cancelTranscodeSignal();
+    void playbackStopped();
 private:
-	void loadIndex() {
-		m_wallpapers.clear();
-		QFile file(getAppDataPath() + "/vid_index.txt");
-		if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return;
-		QTextStream in(&file);
-		while (!in.atEnd()) {
-			QString line = in.readLine().trimmed();
-			if (!line.isEmpty()) m_wallpapers.insert(line);
-		}
-		file.close();
-	}
-
-	void saveIndex() {
-		QFile file(getAppDataPath() + "/vid_index.txt");
-		if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) return;
-		QTextStream out(&file);
-		for (const QString& wp : m_wallpapers) out << wp << "\n";
-		file.close();
-	}
-	QString getAppDataPath() const {
-		QString baseDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
-		QString appDir = baseDir + "/LWallpaper";
-
-		QDir dir(appDir);
-		if (!dir.exists()) {
-			dir.mkpath(".");
-		}
-		return appDir;
-	}
-	QSet<QString> m_wallpapers;
-	QPointer<QThread> m_thread;
-	QPointer<WallpaperWorker> m_worker;
-	QString m_activeFilename;
+    void loadIndex() {
+        QFile file(getAppDataPath() + "/vid_index.txt");
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+        QTextStream in(&file);
+        while (!in.atEnd()) {
+            const QString line = in.readLine().trimmed();
+            if (!line.isEmpty()) m_wallpapers.insert(line);
+        }
+    }
+    void saveIndex() {
+        QFile file(getAppDataPath() + "/vid_index.txt");
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) return;
+        QTextStream out(&file);
+        for (const auto& filename : m_wallpapers) out << filename << "\n";
+    }
+    QString getAppDataPath() const {
+        const QString path = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/LWallpaper";
+        QDir().mkpath(path);
+        return path;
+    }
+    QSet<QString> m_wallpapers;
+    QPointer<QThread> m_thread;
+    QPointer<WallpaperWorker> m_worker;
+    QString m_activeFilename;
 };

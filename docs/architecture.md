@@ -14,18 +14,13 @@ class names.
 - **`src/wallpaper/wallpaper_api.hpp`** provides the Qt-facing wallpaper library
   and playback worker. Qt's MOC processes this header because it declares
   `QObject` classes.
-- **`src/wallpaper/wallpaper_core.hpp`** contains desktop-window integration,
-  frame queues, decoding, playback timing, visibility handling, SDL rendering
-  and transcoding. This existing header-only core is deliberately preserved;
-  splitting its internals is a separate behavioral refactor.
-- **`src/render/d3d11_zero_copy.hpp`** implements the hardware zero-copy render
-  path used by the wallpaper worker.
-- **`src/wallpaper/playback_clock.hpp`** handles PTS-based deadlines, loop/resume
-  synchronization and stale-frame rejection using a monotonic clock.
-- **`src/wallpaper/video_frame_pool.hpp`** owns reusable reference-counted CPU
-  conversion buffers; queued frames keep their buffers alive independently.
-- **`src/wallpaper/import_policy.hpp`** calculates bounded, aspect-preserving
-  import dimensions and declares import result metadata.
+- **`third_party/lwallpaper_core`** is a git submodule pinned to a core commit.
+  Its `livewallpaper::Wallpaper` public API owns decoding, native windows,
+  rendering, visibility pause and timing. `transcodeToScreenResolution` handles
+  conversion. The Qt worker only calls the library and forwards its status/errors;
+  it does not include the private FFmpeg/Direct3D engine headers.
+- Core implementation and optimization tests are maintained in the core
+  repository. GUI collection publication/cancellation tests live here.
 
 Project includes are rooted at `src/`, for example
 `#include "wallpaper/wallpaper_api.hpp"`. Includes within one module may remain

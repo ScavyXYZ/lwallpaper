@@ -38,6 +38,10 @@ jobs:
           git -C third_party/lwallpaper_core lfs pull
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git -C third_party/lwallpaper_core lfs fsck
+      - name: Set up Python for Qt installer
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.14'
       - name: Install Qt
         id: qt
         uses: jurplel/install-qt-action@b344308e4483fc892e0d27b3cd1b173ebdd95f06 # v4.5.0
@@ -46,7 +50,8 @@ jobs:
           host: windows
           target: desktop
           arch: win64_msvc2022_64
-          modules: qtsvg
+          setup-python: false
+          aqtversion: '==3.3.0'
           cache: true
       - name: Prepare verified FFmpeg CLI
         run: >-

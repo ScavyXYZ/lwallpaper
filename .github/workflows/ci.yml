@@ -84,6 +84,17 @@ jobs:
           path: out/ci-package/${{ matrix.configuration }}/
           if-no-files-found: error
           retention-days: 14
+      - name: Build installer
+        if: matrix.configuration == 'Release'
+        run: ./scripts/build-installer.ps1 -BuildDirectory out/ci-package/Release
+      - name: Upload installer
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: gui-windows-x64-installer
+          path: build/installer/
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload test and configuration diagnostics
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
